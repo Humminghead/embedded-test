@@ -1,0 +1,35 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        // Start debug session
+        {
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "probe-rs-debug",
+            "cwd": "${workspaceFolder}",
+            "connectUnderReset": false,
+            // "chip": "STM32F303VCTx",
+            "chip": "STM32F103C8",
+            "probe": "0483:3748",
+            "flashingConfig": {
+                "flashingEnabled": true,
+                "haltAfterReset": false
+            },
+            "env": {
+                // "DEFMT_LOG": "trace",
+                // "RUST_LOG":"error"
+            },
+            "consoleLogLevel": "Console",
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "programBinary": "./target/thumbv7em-none-eabi/debug/test_out_stm32f103c8",
+                    "svdFile": "./svd/STM32F103.svd" 
+                }
+            ]
+        }
+    ]
+}
