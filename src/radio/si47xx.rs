@@ -1,4 +1,4 @@
-use defmt::{bitflags, info};
+use defmt::bitflags;
 use embedded_hal::i2c::I2c;
 
 #[repr(u8)]
@@ -58,7 +58,7 @@ pub enum OptMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverError<E> {
     I2c(E),
-    DeviceError,
+    InvalidArg,
     CtsTimeout,
 }
 
@@ -120,14 +120,23 @@ where
         cmd: u8,
         args: &[u8],
     ) -> Result<[u8; N], ReceiverError<E>> {
-        let mut buf = [cmd; 3];
-        let arg_len = args.len().min(7);
+        // create buffer and fill it with zeroies
+        let mut buf: [u8; 8] = [cmd; 8];
+        buf.fill(0);
 
-        //copies the arguments into the buffer starting at index 1 (after the command byte).
+        // check buffer's out of boundary
+        let arg_len = args.len().min(buf.len());
+
+        // copies the cmd in the buffer
+        buf[0] = cmd;
+
+        // copies the arguments into the buffer starting at index 1 (after the command byte).
         buf[1..1 + arg_len].copy_from_slice(&args[..arg_len]);
-        
+
+        // create responce buffer
         let mut responce = [0; N];
 
+        // send command + arguments
         match self
             .bus
             .write_read(self.address, &buf[..1 + arg_len], &mut responce)
@@ -147,7 +156,7 @@ where
         let err = (status & ReceiverStatus::ERR.bits()) == ReceiverStatus::ERR.bits();
 
         if err {
-            return Err(ReceiverError::DeviceError);
+            return Err(ReceiverError::InvalidArg);
         }
 
         if !cts {
@@ -190,7 +199,7 @@ where
         let result = RevisionResponse::from_bytes(&bytes);
 
         if result.is_err() {
-            return Err(ReceiverError::DeviceError);
+            return Err(ReceiverError::InvalidArg);
         }
 
         Ok(result.unwrap())
