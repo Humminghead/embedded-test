@@ -1,4 +1,4 @@
-use defmt::bitflags;
+use defmt::{bitflags, info};
 use embedded_hal::i2c::I2c;
 
 #[repr(u8)]
@@ -90,14 +90,14 @@ impl RevisionResponse {
         }
 
         Ok(RevisionResponse {
-            pn: data[1],
-            fw_major: data[2],
-            fw_minor: data[3],
-            patch_h: data[4],
-            patch_l: data[5],
-            cmp_major: data[6],
-            cmp_minor: data[7],
-            chiprev: data[8],
+            pn: data[0],
+            fw_major: data[1],
+            fw_minor: data[2],
+            patch_h: data[3],
+            patch_l: data[4],
+            cmp_major: data[5],
+            cmp_minor: data[6],
+            chiprev: data[7],
         })
     }
 }
@@ -120,18 +120,22 @@ where
         cmd: u8,
         args: &[u8],
     ) -> Result<[u8; N], ReceiverError<E>> {
-        let mut buf = [cmd; 8];
+        let mut buf = [cmd; 3];
         let arg_len = args.len().min(7);
 
         //copies the arguments into the buffer starting at index 1 (after the command byte).
         buf[1..1 + arg_len].copy_from_slice(&args[..arg_len]);
-
+        
         let mut responce = [0; N];
+
         match self
             .bus
             .write_read(self.address, &buf[..1 + arg_len], &mut responce)
         {
-            Ok(_) => return Ok(responce),
+            Ok(_) => {
+                return Ok(responce);
+            }
+
             Err(e) => {
                 return Err(ReceiverError::I2c(e));
             }
@@ -177,7 +181,7 @@ where
     }
 
     pub async fn get_rev_info(&mut self) -> Result<RevisionResponse, ReceiverError<E>> {
-        let data = self.send_command::<8>(Command::GetRev as u8, &[]).await?;
+        let data = self.send_command::<9>(Command::GetRev as u8, &[]).await?;
         self.check_bus_status_byte(data[0])?;
 
         let mut bytes: [u8; 8] = [0x00; 8];
