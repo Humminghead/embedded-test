@@ -1,36 +1,39 @@
 #![no_std]
 #![no_main]
 
-use core::result;
+use crate::radio::si47xx::{self, ReceiverError};
 
-use crate::radio::si47xx;
-
-use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
+use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::i2c::I2c;
-use embassy_stm32::pac::GPIOB;
-use embassy_stm32::{bind_interrupts, peripherals};
-use embassy_sync::signal;
+use embassy_stm32::i2c::{Config, I2c};
+use embassy_stm32::peripherals::I2C2;
 use embassy_time::Timer;
-use embedded_hal::digital::{ErrorType, OutputPin}; // or embedded_hal::digital::v2::OutputPin
+use embedded_hal::digital::OutputPin; // or embedded_hal::digital::v2::OutputPin
 use panic_probe as _;
-
 mod radio;
 
 bind_interrupts!(
     struct Irqs {
-        // USB_LP_CAN1_RX0 => embassy_stm32::usb::InterruptHandler<peripherals::USB>;
+        I2C2_EV => embassy_stm32::i2c::EventInterruptHandler<I2C2>;
+        I2C2_ER => embassy_stm32::i2c::ErrorInterruptHandler<I2C2>;
     }
 );
 
 // Device address
-static I2C_ADDR: u8 = 0x63;
+static I2C_ADDR_SEN_0: u8 = 0b00010001; // 0x11
+static I2C_ADDR_SEN_1: u8 = 0b01100011; // 0x63
+
+// Led flash time
+static BLINK_LONG: (i32, i32) = (500, 500);
+static BLINK_SHORT: (i32, i32) = (125, 125);
 
 // Led error codes
-static CODE_RESET_ERR: [(i32, i32); 2] = [(125, 125), (125, 125)]; // 2
-static CODE_CHIP_POWER_UP_ERR: [(i32, i32); 3] = [(125, 125), (125, 125), (125, 125)]; // 3
+static CODE_RESET_ERR: [(i32, i32); 2] = [BLINK_SHORT, BLINK_SHORT]; // 2
+static CODE_CHIP_POWER_UP_ERR: [(i32, i32); 3] = [BLINK_SHORT, BLINK_SHORT, BLINK_SHORT]; // 3
+static CODE_IIC_CTS_TIMEOUT_ERR: [(i32, i32); 2] = [BLINK_LONG, BLINK_SHORT]; // 11
+static CODE_IIC_INVALID_ARG_ERR: [(i32, i32); 3] = [BLINK_LONG, BLINK_SHORT, BLINK_SHORT]; // 12
 
 // Time values
 static RESTART_TIME_SEC: u64 = 2;
@@ -82,17 +85,36 @@ async fn main(_s: Spawner) {
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
     // Create radio device
-    let i2c = I2c::new_blocking(p.I2C2, p.PB10, p.PB11, Default::default());
-    let mut device = si47xx::Receiver::new(i2c, I2C_ADDR);
+    let i2c = I2c::new_no_dma(p.I2C2, p.PB10, p.PB11, Irqs, Default::default());
+    let mut device = si47xx::Receiver::new(i2c, I2C_ADDR_SEN_1);
 
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
         error_loop(&mut led_pin, &CODE_RESET_ERR).await;
     }
 
-    if device.power_up(si47xx::OptMode::AnalogAudio).await.is_err() {
+    let err = device.power_up(si47xx::OptMode::AnalogAudio).await;
+
+    if err == Err(ReceiverError::CtsTimeout) {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    } else if err == Err(ReceiverError::InvalidArg) {
+        error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
+    } else {
         error_loop(&mut led_pin, &CODE_CHIP_POWER_UP_ERR).await;
     }
+
+    // match device.power_up(si47xx::OptMode::AnalogAudio).await {
+    //     Ok(()) => {}
+    //     Err(ReceiverError::CtsTimeout) => {
+    //         error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    //     }
+    //     Err(ReceiverError::InvalidArg) => {
+    //         error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
+    //     }
+    //     Err(ReceiverError::I2c(_)) => {
+    //         error_loop(&mut led_pin, &CODE_CHIP_POWER_UP_ERR).await;
+    //     }
+    // }
 
     // let info = device.get_rev_info().await;
 
