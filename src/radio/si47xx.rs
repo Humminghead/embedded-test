@@ -49,10 +49,10 @@ pub enum Function {
 #[derive(Debug, Clone, Copy)]
 pub enum OptMode {
     RdsOnly = 0,
-    AnalogAudio = 0b0000_0101,
-    DigitalAudio = 0b0000_1011,
-    DigitalAudioFmRx2 = 0b1011_0000,
-    AnalogDigitalAudioFmRx2 = 0b1011_0101,
+    AnalogAudio = 0b0000_0101,             // Analog audio
+    DigitalAudio = 0b0000_1011,            // Digital audio output (DCLK, LOUT/DFS, ROUT/DIO)
+    DigitalAudioFmRx2 = 0b1011_0000,       // Digital audio output (DCLK, DFS, DIO)
+    AnalogDigitalAudioFmRx2 = 0b1011_0101, // Analog and digital audio outputs (LOUT/ROUT and DCLK, DFS,DIO)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
