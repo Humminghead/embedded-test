@@ -1,11 +1,18 @@
-use defmt::bitflags;
+use core::error;
+
+use defmt::{bitflags, Format};
+use defmt::{error, info};
+use embassy_time::Timer;
 use embedded_hal::i2c::I2c;
+
+static TIMEOUT_CTS_WAIT: u64 = 10; //millis
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 enum Command {
     PowerUp = 0x01,
     PowerDown = 0x11,
+    GetIntStatus = 0x14,
     GetRev = 0x10,
 }
 
@@ -15,8 +22,8 @@ bitflags! {
       const GPO2OEN = 0x40;
       const PATCH = 0x20;
       const XOSCEN = 0x10;
-      const FUNC = 0x0F;
-  }
+      const FUNC = 0x0F;      
+  }  
 }
 
 // AN332
@@ -55,14 +62,14 @@ pub enum OptMode {
     AnalogDigitalAudioFmRx2 = 0b1011_0101, // Analog and digital audio outputs (LOUT/ROUT and DCLK, DFS,DIO)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum ReceiverError<E> {
     I2c(E),
     InvalidArg,
     CtsTimeout,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub struct RevisionResponse {
     /// Part Number (PN[7:0])
     pub pn: u8,
@@ -84,6 +91,12 @@ pub struct RevisionResponse {
 }
 
 impl RevisionResponse {
+    fn convert_chip_hex_to_digit(digit: &u8) -> u8 {
+        if digit.is_ascii_digit() {
+            return digit - 0x30;
+        }
+        0
+    }
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
         if data.len() != 8 {
             return Err("Wrong data length!");
@@ -91,12 +104,12 @@ impl RevisionResponse {
 
         Ok(RevisionResponse {
             pn: data[0],
-            fw_major: data[1],
-            fw_minor: data[2],
+            fw_major: Self::convert_chip_hex_to_digit(&data[1]),
+            fw_minor: Self::convert_chip_hex_to_digit(&data[2]),
             patch_h: data[3],
             patch_l: data[4],
-            cmp_major: data[5],
-            cmp_minor: data[6],
+            cmp_major: Self::convert_chip_hex_to_digit(&data[5]),
+            cmp_minor: Self::convert_chip_hex_to_digit(&data[6]),
             chiprev: data[7],
         })
     }
@@ -166,17 +179,32 @@ where
         Ok(())
     }
 
-    pub async fn power_up(&mut self, mode: OptMode) -> Result<(), ReceiverError<E>> {
+    pub async fn power_up(&mut self, arg1: u8, arg2: OptMode) -> Result<(), ReceiverError<E>> {
         let resp = self
-            .send_command::<1>(
-                Command::PowerUp as u8,
-                &[PowerUpArg::empty().bits(), mode as u8],
-            )
+            .send_command::<1>(Command::PowerUp as u8, &[arg1, arg2 as u8])
             .await?;
 
         self.check_bus_status_byte(resp[0])?;
 
         Ok(())
+    }
+
+    pub async fn poll_int_status(&mut self) -> Result<(), ReceiverError<E>> {
+        loop {
+            let resp = self
+                .send_command::<1>(Command::GetIntStatus as u8, &[])
+                .await?;
+            if (resp[0] & ReceiverStatus::CTS.bits()) == ReceiverStatus::CTS.bits() {
+                return Ok(());
+            }
+            error!(
+                "Wait {} millis after command {:X} responce {:X}",
+                TIMEOUT_CTS_WAIT,
+                Command::GetIntStatus as u8,
+                resp[0]
+            );
+            Timer::after_millis(TIMEOUT_CTS_WAIT).await;
+        }
     }
 
     pub async fn power_down(&mut self) -> Result<(), ReceiverError<E>> {
