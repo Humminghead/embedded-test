@@ -1,8 +1,9 @@
 #![no_std]
 #![no_main]
 
-use crate::radio::si47xx::{self, ReceiverError};
+use crate::radio::si47xx::{self, PowerUpArg, ReceiverError};
 
+use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
@@ -27,7 +28,7 @@ static I2C_ADDR_SEN_1: u8 = 0b01100011; // 0x63
 
 // Led flash time
 static BLINK_LONG: (i32, i32) = (500, 500);
-static BLINK_SHORT: (i32, i32) = (125, 125);
+static BLINK_SHORT: (i32, i32) = (250, 250);
 
 // Led error codes
 static CODE_RESET_ERR: [(i32, i32); 2] = [BLINK_SHORT, BLINK_SHORT]; // 2
@@ -37,6 +38,10 @@ static CODE_IIC_INVALID_ARG_ERR: [(i32, i32); 3] = [BLINK_LONG, BLINK_SHORT, BLI
 
 // Time values
 static RESTART_TIME_SEC: u64 = 2;
+
+// Power up options
+const POWER_UP_FLAGS: u8 =
+    (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
 
 /* Flashes the led according a signal pattern */
 async fn flash_singnal<P: OutputPin>(pin: &mut P, singnal: &[(i32, i32)]) {
@@ -93,35 +98,29 @@ async fn main(_s: Spawner) {
         error_loop(&mut led_pin, &CODE_RESET_ERR).await;
     }
 
-    let err = device.power_up(si47xx::OptMode::AnalogAudio).await;
+    let err = device.power_up(POWER_UP_FLAGS, si47xx::OptMode::AnalogAudio).await;
 
     if err == Err(ReceiverError::CtsTimeout) {
-        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+        loop {
+            if device.poll_int_status().await.is_ok() {
+                break;
+            }
+            flash_singnal(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+        }
     } else if err == Err(ReceiverError::InvalidArg) {
         error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
     } else {
+        error!("other");
         error_loop(&mut led_pin, &CODE_CHIP_POWER_UP_ERR).await;
     }
 
-    // match device.power_up(si47xx::OptMode::AnalogAudio).await {
-    //     Ok(()) => {}
-    //     Err(ReceiverError::CtsTimeout) => {
-    //         error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
-    //     }
-    //     Err(ReceiverError::InvalidArg) => {
-    //         error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
-    //     }
-    //     Err(ReceiverError::I2c(_)) => {
-    //         error_loop(&mut led_pin, &CODE_CHIP_POWER_UP_ERR).await;
-    //     }
-    // }
+    info!("Chip revision: {}", device.get_rev_info().await.unwrap());
 
-    // let info = device.get_rev_info().await;
-
-    // Timer::after_secs(2).await;
-    // let _ = device.power_down().await;
+    Timer::after_secs(2).await;
+    let _ = device.power_down().await;
 
     loop {
         Timer::after_secs(1).await;
+        //flash_singnal(&mut led_pin, &[BLINK_LONG, BLINK_LONG, BLINK_LONG]).await;
     }
 }
