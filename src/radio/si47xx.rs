@@ -14,6 +14,7 @@ enum Command {
     PowerDown = 0x11,
     GetIntStatus = 0x14,
     GetRev = 0x10,
+    SetProperty = 0x12,
 }
 
 bitflags! {
@@ -22,8 +23,8 @@ bitflags! {
       const GPO2OEN = 0x40;
       const PATCH = 0x20;
       const XOSCEN = 0x10;
-      const FUNC = 0x0F;      
-  }  
+      const FUNC = 0x0F;
+  }
 }
 
 // AN332
@@ -134,7 +135,7 @@ where
         args: &[u8],
     ) -> Result<[u8; N], ReceiverError<E>> {
         // create buffer and fill it with zeroies
-        let mut buf: [u8; 8] = [cmd; 8];
+        let mut buf: [u8; 8] = [0x00; 8];
         buf.fill(0);
 
         // check buffer's out of boundary
@@ -231,5 +232,21 @@ where
         }
 
         Ok(result.unwrap())
+    }
+
+    pub async fn set_property(&mut self, property: u16,value:u16)->Result<ReceiverStatus, ReceiverError<E>> {
+        let mut buf: [u8; 5] = [0x00; 5];
+        buf.fill(0x00);        
+        buf[0] = 0x00; // Reserved. Always write to 0.
+        buf[1] = (property & 0xFF) as u8;    // property low byte
+        buf[2] = (property >> 8) as u8;      // property high byte
+        buf[3] = (value & 0xFF) as u8;       // value low byte
+        buf[4] = (value >> 8) as u8;         // value high byte        
+       
+        let result = self.send_command::<1>(Command::SetProperty as u8,&buf).await?;
+
+        self.check_bus_status_byte(result[0])?;
+
+        Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))        
     }
 }
