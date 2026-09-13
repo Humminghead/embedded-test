@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
 
-use crate::radio::si47xx::{self, PowerUpArg, ReceiverError};
+use crate::radio::si47xx::{self, is_bus_cts, PowerUpArg};
 
 use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::i2c::{Config, I2c};
+use embassy_stm32::i2c::I2c;
 use embassy_stm32::peripherals::I2C2;
 use embassy_time::Timer;
 use embedded_hal::digital::OutputPin; // or embedded_hal::digital::v2::OutputPin
@@ -78,6 +78,12 @@ async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) {
     }
 }
 
+async fn check_cts<P: OutputPin>(pin: &mut P, value: u8) {
+    if !is_bus_cts(value) {
+        error_loop(pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
     // Create mcu's peripherial
@@ -91,36 +97,97 @@ async fn main(_s: Spawner) {
 
     // Create radio device
     let i2c = I2c::new_no_dma(p.I2C2, p.PB10, p.PB11, Irqs, Default::default());
-    let mut device = si47xx::Receiver::new(i2c, I2C_ADDR_SEN_1);
+    let mut device = si47xx::FmReceiver::new(i2c, I2C_ADDR_SEN_1);
 
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
         error_loop(&mut led_pin, &CODE_RESET_ERR).await;
     }
 
-    let err = device.power_up(POWER_UP_FLAGS, si47xx::OptMode::AnalogAudio).await;
+    let status = device
+        .power_up(POWER_UP_FLAGS, si47xx::OptMode::AnalogAudio)
+        .await;
 
-    if err == Err(ReceiverError::CtsTimeout) {
-        loop {
-            if device.poll_int_status().await.is_ok() {
-                break;
-            }
-            flash_singnal(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
-        }
-    } else if err == Err(ReceiverError::InvalidArg) {
+    if si47xx::is_bus_error(status.unwrap().bits()) {
         error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
-    } else {
-        error!("other");
-        error_loop(&mut led_pin, &CODE_CHIP_POWER_UP_ERR).await;
+    }
+
+    // Wait CTS
+    loop {
+        let status = device.get_int_status().await;
+        if si47xx::wait_cts(&status.unwrap()).await {
+            break;
+        }
     }
 
     info!("Chip revision: {}", device.get_rev_info().await.unwrap());
 
-    Timer::after_secs(2).await;
+    {
+        // Set GPO_IEN properties
+        let res = device
+            .set_property(
+                si47xx::ReceiverProperties::GpoIen as u16,
+                (si47xx::GpoIen::STC_IEN
+                    | si47xx::GpoIen::RSQ_IEN
+                    | si47xx::GpoIen::CTS_IEN
+                    | si47xx::GpoIen::ERR_IEN)
+                    .bits(),
+            )
+            .await;
+
+        check_cts(&mut led_pin, res.unwrap().bits()).await;
+    }
+
+    // Set TUNE_FREQ
+    {
+        let _ = device.set_tune_freq(10340).await;
+        // check_cts(&mut led_pin, res.unwrap().bits()).await;
+        
+
+        // Wait CTS
+        loop {
+            let status = device.get_int_status().await;
+            if si47xx::wait_cts(&status.unwrap()).await {
+                break;
+            }
+        }
+
+        error!("1");
+    }
+
+    // Wait STCINT
+    loop {
+        error!("2");
+        let res = device.get_int_status().await;
+        let status = res.unwrap();
+
+        if status.contains(si47xx::ReceiverStatus::STCINT) {
+            flash_singnal(
+                &mut led_pin,
+                &[
+                    BLINK_LONG,
+                    BLINK_SHORT,
+                    BLINK_SHORT,
+                    BLINK_LONG,
+                    BLINK_SHORT,
+                    BLINK_SHORT,
+                ],
+            )
+            .await;
+            break;
+        }
+
+        Timer::after_secs(1).await;
+        error!("3");
+    }
+
+    error!("4");
+    Timer::after_secs(30).await;
     let _ = device.power_down().await;
 
+    error!("5");
     loop {
         Timer::after_secs(1).await;
-        //flash_singnal(&mut led_pin, &[BLINK_LONG, BLINK_LONG, BLINK_LONG]).await;
+        flash_singnal(&mut led_pin, &[BLINK_LONG, BLINK_SHORT]).await;
     }
 }
