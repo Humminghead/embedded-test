@@ -7,7 +7,7 @@ use defmt::{debug, error, info};
 use embassy_time::Timer;
 use embedded_hal::i2c::I2c;
 
-static TIMEOUT_CTS_WAIT: u64 = 10; //millis
+static TIMEOUT_CTS_WAIT: u64 = 10; // µs
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
@@ -18,6 +18,10 @@ enum Command {
     GetIntStatus = 0x14,
     SetProperty = 0x12,
     FmTuneFreq = 0x20,
+    FmSeekStart = 0x21,
+    FmTuneStatus = 0x22,
+    FmRsqStatus = 0x23,
+    FmRdsStatus = 0x24,
     AmTuneFreq = 0x40, // AM/SW/LW
     AmSeekStart = 0x41,
     AmTuneStatus = 0x42,
@@ -200,12 +204,11 @@ pub fn is_bus_error(status: u8) -> bool {
 }
 
 pub fn is_bus_cts(status: u8) -> bool {
-    status & ReceiverStatus::CTS.bits() == ReceiverStatus::CTS.bits
+    status & ReceiverStatus::CTS.bits() == ReceiverStatus::CTS.bits()
 }
 
 pub async fn wait_cts(status: &ReceiverStatus) -> bool {
     Timer::after_micros(TIMEOUT_CTS_WAIT).await;
-
     is_bus_cts(status.bits() as u8)
 }
 
@@ -407,6 +410,23 @@ where
         let arg1 = if intack { 0x01 } else { 0x00 };
         let r = self
             .send_command::<8>(Command::AmTuneStatus as u8, &[arg1])
+            .await?;
+        Ok(r)
+    }
+
+    pub async fn fm_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
+        // FM_TUNE_STATUS: ARG1 has CANCEL (bit 1) and INTACK (bit 0)
+        let arg1 = if intack { 0x01 } else { 0x00 };
+        let r = self
+            .send_command::<8>(Command::FmTuneStatus as u8, &[arg1])
+            .await?;
+        Ok(r)
+    }
+
+    pub async fn fm_rsq_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
+        let arg1 = if intack { 0x01 } else { 0x00 };
+        let r = self
+            .send_command::<8>(Command::FmRsqStatus as u8, &[arg1])
             .await?;
         Ok(r)
     }
