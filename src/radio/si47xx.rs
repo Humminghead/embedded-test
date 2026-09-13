@@ -14,10 +14,14 @@ static TIMEOUT_CTS_WAIT: u64 = 10; //millis
 enum Command {
     PowerUp = 0x01,
     PowerDown = 0x11,
-    GetIntStatus = 0x14,
     GetRev = 0x10,
+    GetIntStatus = 0x14,
     SetProperty = 0x12,
     FmTuneFreq = 0x20,
+    AmTuneFreq = 0x40, // AM/SW/LW
+    AmSeekStart = 0x41,
+    AmTuneStatus = 0x42,
+    AmRsqStatus = 0x43,
 }
 
 #[repr(u16)]
@@ -86,6 +90,27 @@ pub enum ReceiverProperties {
     FmHicutCutoffFrequency = 0x1A06,
     RxVolume = 0x4000,
     RxHardMute = 0x4001,
+    AmDeemphasis = 0x3100,
+    AmChannelFilter = 0x3102,
+    AmAutomaticVolumeControlMaxGain = 0x3103,
+    AmModeAfcSwPullInRange = 0x3104,
+    AmModeAfcSwLockInRange = 0x3105,
+    AmRsqInterrupts = 0x3200,
+    AmRsqSnrHighThreshold = 0x3201,
+    AmRsqSnrLowThreshold = 0x3202,
+    AmRsqRssiHighThreshold = 0x3203,
+    AmRsqRssiLowThreshold = 0x3204,
+    AmSoftMuteRate = 0x3300,
+    AmSoftMuteSlope = 0x3301,
+    AmSoftMuteMaxAttenuation = 0x3302,
+    AmSoftMuteSnrThreshold = 0x3303,
+    AmSoftMuteReleaseRate = 0x3304,
+    AmSoftMuteAttackRate = 0x3305,
+    AmSeekBandBottom = 0x3400,
+    AmSeekBandTop = 0x3401,
+    AmSeekFreqSpacing = 0x3402,
+    AmSeekSnrThreshold = 0x3403,
+    AmSeekRssiThreshold = 0x3404,
 }
 
 bitflags! {
@@ -123,6 +148,16 @@ bitflags! {
         const STC_REP   = 0x0100;
         const RDS_REP   = 0x0400;
         const RSQ_REP   = 0x0800;
+    }
+}
+
+// AN332 Table 14 - AM/SW/LW receiver status
+bitflags! {
+    pub struct AmReceiverStatus: u8 {
+        const CTS    = 0x80;
+        const ERR    = 0x40;
+        const RSQINT = 0x08;
+        const STCINT = 0x01;
     }
 }
 
@@ -345,5 +380,34 @@ where
             .await?;
 
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
+    }
+
+    pub async fn set_am_tune_freq(
+        &mut self,
+        freq_khz: u16,
+    ) -> Result<AmReceiverStatus, ReceiverError<E>> {
+        // CMD 0x40, ARG1 = FAST bit (0x01) or 0
+        // ARG2 = FREQH, ARG3 = FREQL, ARG4 = ANTCAPH, ARG5 = ANTCAPL
+        let args: [u8; 5] = [
+            0x00,                    // ARG1: FAST = 0
+            (freq_khz >> 8) as u8,   // ARG2: FREQH
+            (freq_khz & 0xFF) as u8, // ARG3: FREQL
+            0x00,                    // ARG4: auto antenna cap (high)
+            0x00,                    // ARG5: auto antenna cap (low)
+        ];
+
+        let r = self
+            .send_command::<1>(Command::AmTuneFreq as u8, &args)
+            .await?;
+
+        Ok(AmReceiverStatus::from_bits(r[0]).unwrap_or(AmReceiverStatus::empty()))
+    }
+
+    pub async fn am_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
+        let arg1 = if intack { 0x01 } else { 0x00 };
+        let r = self
+            .send_command::<8>(Command::AmTuneStatus as u8, &[arg1])
+            .await?;
+        Ok(r)
     }
 }
