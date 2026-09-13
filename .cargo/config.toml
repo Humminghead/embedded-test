@@ -1,13 +1,15 @@
 [build]
-target = "thumbv7m-none-eabi"
+target = "thumbv7em-none-eabi"
 
 [env]
 DEFMT_LOG = "info"
 
 [target.thumbv7m-none-eabi]
 rustflags = [
-  "-C", "linker=arm-none-eabi-gcc",
-#   "-C", "link-arg=-Tlink.x",
-  "-C", "link-arg=-nostartfiles",
-  "-C", "relocation-model=static",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "linker-flavor=ld",
+    "-C", "linker=lld",
+    "-C", "relocation-model=static",
+    "-C", "link-arg=--defsym=__STACK_SIZE=2048",
+    "-C", "link-arg=--defsym=__MAIN_STACK_SIZE=1024",
 ]
