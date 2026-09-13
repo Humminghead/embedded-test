@@ -86,16 +86,11 @@ async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
 
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
-    // Create mcu's peripherial
     let p = embassy_stm32::init(Default::default());
 
-    // Create rst pin for control of the reset of the SI device
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
-
-    // Create led pin for device state monitoring
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
-    // Create radio device
     let i2c = I2c::new_no_dma(p.I2C2, p.PB10, p.PB11, Irqs, Default::default());
     let mut device = si47xx::FmReceiver::new(i2c, I2C_ADDR_SEN_1);
 

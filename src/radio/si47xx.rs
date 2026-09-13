@@ -201,23 +201,14 @@ pub fn is_bus_cts(status: u8) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub struct RevisionResponse {
-    /// Part Number (PN[7:0])
     pub pn: u8,
-    /// Firmware major version
     pub fw_major: u8,
-    /// Firmware minor version
     pub fw_minor: u8,
-    /// Patch high byte
     pub patch_h: u8,
-    /// Patch low byte
     pub patch_l: u8,
-    /// Component major version
     pub cmp_major: u8,
-    /// Component minor version
     pub cmp_minor: u8,
-    /// Chip revision
     pub chiprev: u8,
-    // (Optional: CID for Si4705 – if needed, add field)
 }
 
 impl RevisionResponse {
@@ -295,7 +286,6 @@ where
         let resp = self
             .send_command::<1>(Command::PowerUp as u8, &[arg1, arg2 as u8])
             .await?;
-
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
@@ -306,7 +296,6 @@ where
         let resp = self
             .send_command::<1>(Command::GetIntStatus as u8, &[])
             .await?;
-
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
@@ -317,7 +306,6 @@ where
         let resp = self
             .send_command::<1>(Command::PowerDown as u8, &[])
             .await?;
-
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
@@ -417,7 +405,6 @@ where
         let r = self
             .send_command::<1>(Command::AmTuneFreq as u8, &args)
             .await?;
-
         Ok(AmReceiverStatus::from_bits(r[0]).unwrap_or(AmReceiverStatus::empty()))
     }
 
