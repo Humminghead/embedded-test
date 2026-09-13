@@ -22,7 +22,7 @@ bind_interrupts!(
     }
 );
 
-static I2C_ADDR_SEN_1: u8 = 0b01100011; // 0x63
+static I2C_ADDR_SEN_1: u8 = 0b0110_0011; // 0x63 (SEN pin high)
 
 static BLINK_LONG: (i32, i32) = (500, 500);
 static BLINK_SHORT: (i32, i32) = (250, 250);
@@ -33,16 +33,26 @@ static CODE_IIC_INVALID_ARG_ERR: [(i32, i32); 3] = [BLINK_LONG, BLINK_SHORT, BLI
 
 static RESTART_TIME_SEC: u64 = 2;
 
-// ARG1 for POWER_UP in FM receive mode:
-// CTSIEN | GPO2OEN | FUNC[3:0] = 0b1_1_0000
-const POWER_UP_ARG1_FM: u8 = (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
+// ARG1 of POWER_UP in FM receive mode.
+// A 32.768 kHz crystal is populated on RCLK/GPO3 => XOSCEN = 1.
+// AN332 page 65 note: for Si474x it says "Set to 0" but that note only applies
+// when an *external* clock source feeds RCLK; with a passive crystal XOSCEN must be 1.
+const POWER_UP_ARG1_FM: u8 = (PowerUpArg::CTSIEN.bits()
+    | PowerUpArg::GPO2OEN.bits()
+    | PowerUpArg::XOSCEN.bits()) as u8;
 
-// ARG2 OPMODE = 0b0000_0101 analog audio outputs (LOUT/ROUT)
-const POWER_UP_ARG2_ANALOG: u8 = 0b0000_0101;
+// FM band, in 10 kHz units. 8750 = 87.5 MHz, 10800 = 108.0 MHz.
+const FM_BAND_LOW: u16 = 8750;
+const FM_BAND_HIGH: u16 = 10800;
+const FM_STEP_10KHZ: u16 = 10; // 100 kHz
 
-// Target FM frequency: FM_TUNE_FREQ expects 10 kHz units.
-// 103.4 MHz -> 10340 (0x2864)
-const FM_FREQ_10KHZ: u16 = 10050;
+// RSSI threshold (dBuV) to declare a valid station and stop the scan.
+const FM_RSSI_LOCK_THRESHOLD: u8 = 20;
+
+// FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
+// 40 attempts × 5 ms = 200 ms budget.
+const STC_POLL_MS: u64 = 5;
+const STC_MAX_ATTEMPTS: u32 = 40;
 
 async fn flash_signal<P: OutputPin>(pin: &mut P, signal: &[(i32, i32)]) {
     for &(h_ms, l_ms) in signal {
@@ -66,21 +76,15 @@ async fn reset_i2c_device<P: OutputPin>(pin: &mut P) -> bool {
     true
 }
 
-async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) {
+async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
     loop {
         Timer::after_secs(RESTART_TIME_SEC).await;
         flash_signal(pin, sig).await;
     }
 }
 
-async fn check_cts<P: OutputPin>(pin: &mut P, value: u8) {
-    if !is_bus_cts(value) {
-        error_loop(pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
-    }
-}
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
-    let mut cnt = 0;
     let p = embassy_stm32::init(Default::default());
 
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
@@ -95,21 +99,31 @@ async fn main(_s: Spawner) {
     }
 
     // Power up in FM receive mode with analog audio out
-    let status = device
+    let status = match device
         .power_up(POWER_UP_ARG1_FM, si47xx::OptMode::AnalogAudio)
         .await
-        .unwrap();
+    {
+        Ok(s) => s,
+        Err(_) => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await,
+    };
 
     if si47xx::is_bus_error(status.bits()) {
         error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
     }
 
-    Timer::after_millis(500).await; // settle crystal before polling CTS
+    // tCTS for POWER_UP is 110 ms; wait a bit extra for the crystal to settle (XOSCEN = 1).
+    Timer::after_millis(500).await;
 
     // Wait for CTS
     loop {
-        let s = device.get_int_status().await.unwrap();
-        if si47xx::wait_cts(&s).await {
+        let s = match device.get_int_status().await {
+            Ok(s) => s,
+            Err(_) => {
+                Timer::after_micros(300).await;
+                continue;
+            }
+        };
+        if is_bus_cts(s.bits()) {
             break;
         }
         Timer::after_micros(300).await;
@@ -124,116 +138,106 @@ async fn main(_s: Spawner) {
         Err(_) => error!("GET_REV failed"),
     }
 
-    error!("{}", cnt);
-    cnt += 1;
-
-    // Enable CTS + STC + ERR interrupts in GPO_IEN
+    // Enable STC + CTS + ERR interrupts in GPO_IEN
+    if let Ok(res) = device
+        .set_property(
+            si47xx::ReceiverProperties::GpoIen as u16,
+            (si47xx::GpoIen::STC_IEN | si47xx::GpoIen::CTS_IEN | si47xx::GpoIen::ERR_IEN)
+                .bits(),
+        )
+        .await
     {
-        let res = device
-            .set_property(
-                si47xx::ReceiverProperties::GpoIen as u16,
-                (si47xx::GpoIen::STC_IEN | si47xx::GpoIen::CTS_IEN | si47xx::GpoIen::ERR_IEN)
-                    .bits(),
-            )
-            .await
-            .unwrap();
-        check_cts(&mut led_pin, res.bits()).await;
+        if !is_bus_cts(res.bits()) {
+            error!("GPO_IEN did not return CTS");
+        }
     }
 
-    error!("{}", cnt);
-    cnt += 1;
+    // Soft-mute max attenuation = 10 dB
+    let _ = device
+        .set_property(
+            si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation as u16,
+            0x000A,
+        )
+        .await;
 
-    // Optional: configure soft mute / blend / channel filter defaults
-    // For example, set soft mute attenuation to 10 dB:
-    {
-        let _ = device
-            .set_property(
-                si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation as u16,
-                0x000A,
-            )
-            .await;
-    }
+    // Scan the FM band for a station above the RSSI threshold
+    let mut locked: Option<(u16, u8, u8)> = None; // (freq_10khz, rssi, snr)
+    let mut tune_freq = FM_BAND_LOW;
 
-    error!("{}", cnt);
-    cnt += 1;
+    while tune_freq <= FM_BAND_HIGH {
+        // Issue tune
+        if device.set_tune_freq(tune_freq).await.is_err() {
+            error!("FM_TUNE_FREQ i2c error @ {}", tune_freq);
+            tune_freq += FM_STEP_10KHZ;
+            continue;
+        }
 
-    // Tune to FM frequency
-    // ... after the GPO_IEN and soft-mute setup ...
-
-    let mut tune_freq: u16 = 8750;
-    while tune_freq <= 10800 {
-        error!("Tune freq {} ({} kHz)", tune_freq, tune_freq as u32 * 10);
-
-        device.set_tune_freq(tune_freq).await.unwrap();
-
-        // tSTC for FM_TUNE_FREQ is ~60-80 ms on FMRX 4.0; give it plenty of margin.
+        // Wait for STCINT
         let mut attempts = 0u32;
         loop {
-            let s = device.get_int_status().await.unwrap();
+            let s = match device.get_int_status().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
             if s.contains(si47xx::ReceiverStatus::STCINT) {
                 break;
             }
             attempts += 1;
-            if attempts > 40 {
-                // ~200 ms worst case
+            if attempts > STC_MAX_ATTEMPTS {
                 error!("STCINT timeout @ {}", tune_freq);
                 break;
             }
-            Timer::after_millis(5).await; // <-- was micros(10)
+            Timer::after_millis(STC_POLL_MS).await;
         }
 
-        // Read + clear STCINT, then sample RSSI/SNR
-        match device.fm_tune_status(true).await {
-            Ok(resp) => {
-                let freq = ((resp[2] as u16) << 8) | resp[3] as u16;
+        // Read status (also clears STCINT via INTACK)
+        if let Ok(resp) = device.fm_tune_status(true).await {
+            let freq = ((resp[2] as u16) << 8) | resp[3] as u16;
+            let valid = (resp[1] & 0x01) != 0;
+            let rssi = resp[4];
+            let snr = resp[5];
+
+            info!(
+                "READFREQ={} RSSI={} SNR={} VALID={}",
+                freq, rssi, snr, valid
+            );
+
+            if valid && rssi >= FM_RSSI_LOCK_THRESHOLD {
                 info!(
-                    "READFREQ={} RSSI={} SNR={} VALID={}",
-                    freq,
+                    "Locked on {} kHz (RSSI={} dBuV, SNR={} dB)",
+                    freq as u32 * 10,
+                    rssi,
+                    snr
+                );
+                locked = Some((freq, rssi, snr));
+                break;
+            }
+        }
+
+        tune_freq += FM_STEP_10KHZ;
+    }
+
+    // Read RSQ on the locked channel, if any
+    match locked {
+        Some((freq, _, _)) => {
+            if let Ok(resp) = device.fm_rsq_status(true).await {
+                info!(
+                    "RSQ @ {} kHz: RSSI={} dBuV SNR={} dB MULT={} STBLEND={}",
+                    freq as u32 * 10,
                     resp[4],
                     resp[5],
-                    resp[1] & 0x01
+                    resp[6],
+                    resp[7]
                 );
             }
-            Err(_) => error!("FM_TUNE_STATUS failed @ {}", tune_freq),
         }
-
-        tune_freq += 10; // 100 kHz step
+        None => error!(
+            "No station above {} dBuV found in 87.5 - 108.0 MHz",
+            FM_RSSI_LOCK_THRESHOLD
+        ),
     }
 
-    error!("{}", cnt);
-    cnt += 1;
-
-    // Read tune status (clears STCINT via INTACK)
-    match device.fm_tune_status(true).await {
-        Ok(resp) => {
-            let freq = ((resp[2] as u16) << 8) | resp[3] as u16;
-            let rssi = resp[4];
-            let snr = resp[5];
-            info!(
-                "Tuned to {} (10 kHz) RSSI={} dBuV SNR={} dB",
-                freq, rssi, snr
-            );
-        }
-        Err(_) => error!("FM_TUNE_STATUS failed"),
-    }
-
-    error!("{}", cnt);
-    cnt += 1;
-
-    // Read RSQ status once
-    match device.fm_rsq_status(true).await {
-        Ok(resp) => {
-            let rssi = resp[4];
-            let snr = resp[5];
-            info!("RSQ: RSSI={} dBuV SNR={} dB", rssi, snr);
-        }
-        Err(_) => error!("FM_RSQ_STATUS failed"),
-    }
-
-    error!("{}", cnt);
-    cnt += 1;
-
-    // Success blink pattern
+    // Visual confirmation: three long blinks
     flash_signal(&mut led_pin, &[BLINK_LONG, BLINK_LONG, BLINK_LONG]).await;
 
     Timer::after_secs(30).await;

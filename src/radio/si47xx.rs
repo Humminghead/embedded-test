@@ -1,28 +1,20 @@
-//use core::error;
-//use core::fmt::Error;
-
-use defmt::{bitflags, Format};
-use defmt::{debug, error, info};
-//use embassy_sync::channel::Receiver;
-use embassy_time::Timer;
+use defmt::{bitflags, debug, Format};
 use embedded_hal::i2c::I2c;
-
-static TIMEOUT_CTS_WAIT: u64 = 10; // µs
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 enum Command {
     PowerUp = 0x01,
-    PowerDown = 0x11,
     GetRev = 0x10,
-    GetIntStatus = 0x14,
+    PowerDown = 0x11,
     SetProperty = 0x12,
+    GetIntStatus = 0x14,
     FmTuneFreq = 0x20,
     FmSeekStart = 0x21,
     FmTuneStatus = 0x22,
     FmRsqStatus = 0x23,
     FmRdsStatus = 0x24,
-    AmTuneFreq = 0x40, // AM/SW/LW
+    AmTuneFreq = 0x40,
     AmSeekStart = 0x41,
     AmTuneStatus = 0x42,
     AmRsqStatus = 0x43,
@@ -92,8 +84,6 @@ pub enum ReceiverProperties {
     FmHicutMultipathTriggerThreshold = 0x1A04,
     FmHicutMultipathEndThreshold = 0x1A05,
     FmHicutCutoffFrequency = 0x1A06,
-    RxVolume = 0x4000,
-    RxHardMute = 0x4001,
     AmDeemphasis = 0x3100,
     AmChannelFilter = 0x3102,
     AmAutomaticVolumeControlMaxGain = 0x3103,
@@ -115,47 +105,47 @@ pub enum ReceiverProperties {
     AmSeekFreqSpacing = 0x3402,
     AmSeekSnrThreshold = 0x3403,
     AmSeekRssiThreshold = 0x3404,
+    RxVolume = 0x4000,
+    RxHardMute = 0x4001,
 }
 
+// AN332 (REV 1.0); page 65, ARG1 of POWER_UP
 bitflags! {
-  pub struct PowerUpArg:u8 {
-      const CTSIEN = 0x80;
-      const GPO2OEN = 0x40;
-      const PATCH = 0x20;
-      const XOSCEN = 0x10;
-      const FUNC = 0x0F;
-  }
-}
-
-// AN332
-// Table 10. Status Response for the FM/RDS Receiver
-bitflags! {
-  pub struct ReceiverStatus:u8 {
-      const CTS = 0x80;
-      const ERR = 0x40;
-      const RES0 = 0x20;
-      const RES1 = 0x10;
-      const RSQINT = 0x08;
-      const RDSINT = 0x04;
-      const RES2 = 0x02;
-      const STCINT = 0x01;
-  }
-}
-
-bitflags! {
-    pub struct GpoIen: u16 {
-        const STC_IEN   = 0x0001;
-        const RDS_IEN   = 0x0004;
-        const RSQ_IEN   = 0x0008;
-        const ERR_IEN   = 0x0040;
-        const CTS_IEN   = 0x0080;
-        const STC_REP   = 0x0100;
-        const RDS_REP   = 0x0400;
-        const RSQ_REP   = 0x0800;
+    pub struct PowerUpArg: u8 {
+        const CTSIEN  = 0x80;
+        const GPO2OEN = 0x40;
+        const PATCH   = 0x20;
+        const XOSCEN  = 0x10;
+        const FUNC    = 0x0F;
     }
 }
 
-// AN332 Table 14 - AM/SW/LW receiver status
+// AN332 (REV 1.0); Table 10 - Status Response for the FM/RDS Receiver
+bitflags! {
+    pub struct ReceiverStatus: u8 {
+        const CTS    = 0x80;
+        const ERR    = 0x40;
+        const RSQINT = 0x08;
+        const RDSINT = 0x04;
+        const STCINT = 0x01;
+    }
+}
+
+// AN332 (REV 1.0); page 84 - GPO_IEN
+bitflags! {
+    pub struct GpoIen: u16 {
+        const STC_IEN = 0x0001;
+        const RDS_IEN = 0x0004;
+        const RSQ_IEN = 0x0008;
+        const ERR_IEN = 0x0040;
+        const CTS_IEN = 0x0080;
+        const STC_REP = 0x0100;
+        const RDS_REP = 0x0400;
+        const RSQ_REP = 0x0800;
+    }
+}
+
+// AN332 (REV 1.0); Table 14 - AM/SW/LW receiver status
 bitflags! {
     pub struct AmReceiverStatus: u8 {
         const CTS    = 0x80;
@@ -175,21 +165,21 @@ impl Default for GpoIen {
 #[derive(Debug, Clone, Copy)]
 pub enum Function {
     FmReceive = 0,
-    AmReceive,
-    FmTrasmit,
-    WbReceive,
-    AuxIn,
+    AmReceive = 1,
+    FmTransmit = 2,
+    WbReceive = 3,
+    AuxIn = 4,
     QueryLibId = 15,
 }
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum OptMode {
-    RdsOnly = 0,
-    AnalogAudio = 0b0000_0101,             // Analog audio
-    DigitalAudio = 0b0000_1011,            // Digital audio output (DCLK, LOUT/DFS, ROUT/DIO)
-    DigitalAudioFmRx2 = 0b1011_0000,       // Digital audio output (DCLK, DFS, DIO)
-    AnalogDigitalAudioFmRx2 = 0b1011_0101, // Analog and digital audio outputs (LOUT/ROUT and DCLK, DFS,DIO)
+    RdsOnly = 0b0000_0000,
+    AnalogAudio = 0b0000_0101,
+    DigitalAudio = 0b0000_1011,
+    DigitalAudioFmRx2 = 0b1011_0000,
+    AnalogDigitalAudioFmRx2 = 0b1011_0101,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
@@ -207,39 +197,27 @@ pub fn is_bus_cts(status: u8) -> bool {
     status & ReceiverStatus::CTS.bits() == ReceiverStatus::CTS.bits()
 }
 
-pub async fn wait_cts(status: &ReceiverStatus) -> bool {
-    Timer::after_micros(TIMEOUT_CTS_WAIT).await;
-    is_bus_cts(status.bits() as u8)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub struct RevisionResponse {
-    /// Part Number (PN[7:0])
     pub pn: u8,
-    /// Firmware major version
     pub fw_major: u8,
-    /// Firmware minor version
     pub fw_minor: u8,
-    /// Patch high byte
     pub patch_h: u8,
-    /// Patch low byte
     pub patch_l: u8,
-    /// Component major version
     pub cmp_major: u8,
-    /// Component minor version
     pub cmp_minor: u8,
-    /// Chip revision
     pub chiprev: u8,
-    // (Optional: CID for Si4705 – if needed, add field)
 }
 
 impl RevisionResponse {
-    fn convert_chip_hex_to_digit(digit: &u8) -> u8 {
+    fn ascii_digit_to_u8(digit: &u8) -> u8 {
         if digit.is_ascii_digit() {
-            return digit - 0x30;
+            digit - b'0'
+        } else {
+            0
         }
-        0
     }
+
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
         if data.len() != 8 {
             return Err("Wrong data length!");
@@ -247,12 +225,12 @@ impl RevisionResponse {
 
         Ok(RevisionResponse {
             pn: data[0],
-            fw_major: Self::convert_chip_hex_to_digit(&data[1]),
-            fw_minor: Self::convert_chip_hex_to_digit(&data[2]),
+            fw_major: Self::ascii_digit_to_u8(&data[1]),
+            fw_minor: Self::ascii_digit_to_u8(&data[2]),
             patch_h: data[3],
             patch_l: data[4],
-            cmp_major: Self::convert_chip_hex_to_digit(&data[5]),
-            cmp_minor: Self::convert_chip_hex_to_digit(&data[6]),
+            cmp_major: Self::ascii_digit_to_u8(&data[5]),
+            cmp_minor: Self::ascii_digit_to_u8(&data[6]),
             chiprev: data[7],
         })
     }
@@ -271,33 +249,28 @@ where
         Self { bus, address }
     }
 
+    /// Writes `cmd` + up to 7 arguments, then reads `N` response bytes.
+    ///
+    /// AN332 (REV 1.0); page 6: "The system controller may write up to 8 data bytes
+    /// in a single 2-wire transaction. The first byte is a command, and the next
+    /// seven bytes are arguments." So the payload is at most `1 + 7 = 8` bytes.
     async fn send_command<const N: usize>(
         &mut self,
         cmd: u8,
         args: &[u8],
     ) -> Result<[u8; N], ReceiverError<E>> {
-        // create buffer and fill it with zeroies
         let mut buf: [u8; 8] = [0x00; 8];
-        buf.fill(0);
+        let arg_len = args.len().min(buf.len() - 1); // max 7 arguments
 
-        // check buffer's out of boundary
-        let arg_len = args.len().min(buf.len());
-
-        // copies the cmd in the buffer
         buf[0] = cmd;
-
-        // copies the arguments into the buffer starting at index 1 (after the command byte).
         buf[1..1 + arg_len].copy_from_slice(&args[..arg_len]);
 
-        // create responce buffer
-        let mut responce = [0; N];
-
-        // send command + arguments
+        let mut response = [0u8; N];
         self.bus
-            .write_read(self.address, &buf[..1 + arg_len], &mut responce)
+            .write_read(self.address, &buf[..1 + arg_len], &mut response)
             .map_err(ReceiverError::I2c)?;
 
-        return Ok(responce);
+        Ok(response)
     }
 
     pub async fn power_up(
@@ -308,7 +281,6 @@ where
         let resp = self
             .send_command::<1>(Command::PowerUp as u8, &[arg1, arg2 as u8])
             .await?;
-
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
@@ -316,7 +288,6 @@ where
         let resp = self
             .send_command::<1>(Command::GetIntStatus as u8, &[])
             .await?;
-
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
@@ -324,7 +295,6 @@ where
         let resp = self
             .send_command::<1>(Command::PowerDown as u8, &[])
             .await?;
-
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
@@ -335,12 +305,10 @@ where
             return Err(ReceiverError::CtsTimeout);
         }
 
-        let mut bytes: [u8; 8] = [0x00; 8];
+        let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&data[1..]);
 
-        let result = RevisionResponse::from_bytes(&bytes);
-
-        Ok(result.unwrap())
+        RevisionResponse::from_bytes(&bytes).map_err(|_| ReceiverError::InvalidArg)
     }
 
     pub async fn set_property(
@@ -348,86 +316,78 @@ where
         property: u16,
         value: u16,
     ) -> Result<ReceiverStatus, ReceiverError<E>> {
-        let mut buf: [u8; 5] = [0x00; 5];
-        buf.fill(0x00);
-        buf[0] = 0x00; // Reserved. Always write to 0.
-        buf[2] = (property & 0xFF) as u8; // property low byte
-        buf[1] = (property >> 8) as u8; // property high byte
-        buf[4] = (value & 0xFF) as u8; // value low byte
-        buf[3] = (value >> 8) as u8; // value high byte
+        let args: [u8; 5] = [
+            0x00,                     // Reserved. Always 0.
+            (property >> 8) as u8,    // PROPH
+            (property & 0xFF) as u8,  // PROPL
+            (value >> 8) as u8,       // PROPDH
+            (value & 0xFF) as u8,     // PROPDL
+        ];
 
         let result = self
-            .send_command::<1>(Command::SetProperty as u8, &buf)
+            .send_command::<1>(Command::SetProperty as u8, &args)
             .await?;
-
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
+    /// FM_TUNE_FREQ (0x20). `freq` is in 10 kHz units.
     pub async fn set_tune_freq(&mut self, freq: u16) -> Result<ReceiverStatus, ReceiverError<E>> {
-        let mut buf: [u8; 4] = [0x00; 4];
-        buf.fill(0x00);
-        buf[0] = 0x00;
-        buf[1] = (freq >> 8) as u8; // property high byte
-        buf[2] = (freq & 0xFF) as u8; // property low byte
-        buf[3] = 0;
+        let args: [u8; 4] = [
+            0x00,                 // ARG1: FAST=0, FREEZE=0
+            (freq >> 8) as u8,    // ARG2: FREQH
+            (freq & 0xFF) as u8,  // ARG3: FREQL
+            0x00,                 // ARG4: ANTCAP = 0 -> auto
+        ];
 
         debug!(
-            "Set FM freq to: 0x{:X}{:X} ({})",
-            (freq >> 8) as u8,
-            (freq & 0xFF) as u8,
-            freq
+            "FM_TUNE_FREQ: 0x{:02X}{:02X} ({})",
+            args[1], args[2], freq
         );
 
         let result = self
-            .send_command::<1>(Command::FmTuneFreq as u8, &buf)
+            .send_command::<1>(Command::FmTuneFreq as u8, &args)
             .await?;
-
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
+    /// FM_TUNE_STATUS (0x22). Response layout (AN332 page 73):
+    ///   [0] STATUS, [1] BLTF/AFCRL/VALID, [2] READFREQH, [3] READFREQL,
+    ///   [4] RSSI, [5] SNR, [6] MULT, [7] READANTCAP
+    pub async fn fm_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
+        let arg1 = if intack { 0x01 } else { 0x00 };
+        self.send_command::<8>(Command::FmTuneStatus as u8, &[arg1]).await
+    }
+
+    /// FM_RSQ_STATUS (0x23). Response layout (AN332 page 75):
+    ///   [0] STATUS, [1] INT flags, [2] SMUTE/AFCRL/VALID, [3] PILOT/STBLEND,
+    ///   [4] RSSI, [5] SNR, [6] MULT, [7] FREQOFF
+    pub async fn fm_rsq_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
+        let arg1 = if intack { 0x01 } else { 0x00 };
+        self.send_command::<8>(Command::FmRsqStatus as u8, &[arg1]).await
+    }
+
+    /// AM_TUNE_FREQ (0x40). `freq_khz` is in kHz.
     pub async fn set_am_tune_freq(
         &mut self,
         freq_khz: u16,
     ) -> Result<AmReceiverStatus, ReceiverError<E>> {
-        // CMD 0x40, ARG1 = FAST bit (0x01) or 0
-        // ARG2 = FREQH, ARG3 = FREQL, ARG4 = ANTCAPH, ARG5 = ANTCAPL
         let args: [u8; 5] = [
-            0x00,                    // ARG1: FAST = 0
-            (freq_khz >> 8) as u8,   // ARG2: FREQH
-            (freq_khz & 0xFF) as u8, // ARG3: FREQL
-            0x00,                    // ARG4: auto antenna cap (high)
-            0x00,                    // ARG5: auto antenna cap (low)
+            0x00,                          // ARG1: FAST = 0
+            (freq_khz >> 8) as u8,         // ARG2: FREQH
+            (freq_khz & 0xFF) as u8,       // ARG3: FREQL
+            0x00,                          // ARG4: auto antenna cap (high)
+            0x00,                          // ARG5: auto antenna cap (low)
         ];
 
         let r = self
             .send_command::<1>(Command::AmTuneFreq as u8, &args)
             .await?;
-
         Ok(AmReceiverStatus::from_bits(r[0]).unwrap_or(AmReceiverStatus::empty()))
     }
 
+    /// AM_TUNE_STATUS (0x42)
     pub async fn am_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        let r = self
-            .send_command::<8>(Command::AmTuneStatus as u8, &[arg1])
-            .await?;
-        Ok(r)
-    }
-
-    pub async fn fm_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
-        // FM_TUNE_STATUS: ARG1 has CANCEL (bit 1) and INTACK (bit 0)
-        let arg1 = if intack { 0x01 } else { 0x00 };
-        let r = self
-            .send_command::<8>(Command::FmTuneStatus as u8, &[arg1])
-            .await?;
-        Ok(r)
-    }
-
-    pub async fn fm_rsq_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
-        let arg1 = if intack { 0x01 } else { 0x00 };
-        let r = self
-            .send_command::<8>(Command::FmRsqStatus as u8, &[arg1])
-            .await?;
-        Ok(r)
+        self.send_command::<8>(Command::AmTuneStatus as u8, &[arg1]).await
     }
 }
