@@ -189,10 +189,12 @@ pub enum ReceiverError<E> {
     CtsTimeout,
 }
 
+/// The ERR bit (and optional interrupt) is set if an invalid argument is sent.
 pub fn is_bus_error(status: u8) -> bool {
     status & ReceiverStatus::ERR.bits() != 0
 }
 
+/// The CTS bit (and optional interrupt) is set when it is safe to send the next command
 pub fn is_bus_cts(status: u8) -> bool {
     status & ReceiverStatus::CTS.bits() == ReceiverStatus::CTS.bits()
 }
@@ -253,7 +255,7 @@ where
     ///
     /// AN332 (REV 1.0); page 6: "The system controller may write up to 8 data bytes
     /// in a single 2-wire transaction. The first byte is a command, and the next
-    /// seven bytes are arguments." So the payload is at most `1 + 7 = 8` bytes.
+    /// seven bytes are arguments."
     async fn send_command<const N: usize>(
         &mut self,
         cmd: u8,
@@ -273,6 +275,9 @@ where
         Ok(response)
     }
 
+    /// Initiates the boot process to move the device from powerdown to powerup mode
+    /// 
+    /// AN332 (REV 1.0); page 12
     pub async fn power_up(
         &mut self,
         arg1: u8,
@@ -284,6 +289,9 @@ where
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
+    /// Updates bits 6:0 of the status byte.
+    /// 
+    /// AN332 (REV 1.0); page 70
     pub async fn get_int_status(&mut self) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
             .send_command::<1>(Command::GetIntStatus as u8, &[])
@@ -291,6 +299,9 @@ where
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
+    /// Moves the device from powerup to powerdown mode.
+    /// 
+    /// AN332 (REV 1.0); page 67
     pub async fn power_down(&mut self) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
             .send_command::<1>(Command::PowerDown as u8, &[])
@@ -298,6 +309,9 @@ where
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
+    /// Returns the part number, chip revision, firmware revision, patch revision and component revision numbers.
+    /// 
+    /// AN332 (REV 1.0); page 66
     pub async fn get_rev_info(&mut self) -> Result<RevisionResponse, ReceiverError<E>> {
         let data = self.send_command::<9>(Command::GetRev as u8, &[]).await?;
 
@@ -311,6 +325,9 @@ where
         RevisionResponse::from_bytes(&bytes).map_err(|_| ReceiverError::InvalidArg)
     }
 
+    /// Sets a property shown in Table 9, “FM/RDS Receiver Property Summary,” on AN332 page 56.
+    /// 
+    /// AN332 (REV 1.0); page 68
     pub async fn set_property(
         &mut self,
         property: u16,
@@ -330,7 +347,9 @@ where
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
-    /// FM_TUNE_FREQ (0x20). `freq` is in 10 kHz units.
+    /// Sets the FM Receive to tune a frequency between 64 and 108 MHz in 10 kHz units.
+    ///     
+    /// AN332 (REV 1.0); page 70
     pub async fn set_tune_freq(&mut self, freq: u16) -> Result<ReceiverStatus, ReceiverError<E>> {
         let args: [u8; 4] = [
             0x00,                 // ARG1: FAST=0, FREEZE=0
@@ -339,18 +358,17 @@ where
             0x00,                 // ARG4: ANTCAP = 0 -> auto
         ];
 
-        debug!(
-            "FM_TUNE_FREQ: 0x{:02X}{:02X} ({})",
-            args[1], args[2], freq
-        );
-
         let result = self
             .send_command::<1>(Command::FmTuneFreq as u8, &args)
             .await?;
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
-    /// FM_TUNE_STATUS (0x22). Response layout (AN332 page 73):
+    
+    /// Returns the status of FM_TUNE_FREQ or FM_SEEK_START commands.
+    /// 
+    /// AN332 (REV 1.0); page 73
+    /// Response bytes:
     ///   [0] STATUS, [1] BLTF/AFCRL/VALID, [2] READFREQH, [3] READFREQL,
     ///   [4] RSSI, [5] SNR, [6] MULT, [7] READANTCAP
     pub async fn fm_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
@@ -358,7 +376,10 @@ where
         self.send_command::<8>(Command::FmTuneStatus as u8, &[arg1]).await
     }
 
-    /// FM_RSQ_STATUS (0x23). Response layout (AN332 page 75):
+    /// Returns status information about the received signal quality.
+    /// 
+    /// AN332 (REV 1.0); page 75
+    /// Response bytes:
     ///   [0] STATUS, [1] INT flags, [2] SMUTE/AFCRL/VALID, [3] PILOT/STBLEND,
     ///   [4] RSSI, [5] SNR, [6] MULT, [7] FREQOFF
     pub async fn fm_rsq_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
@@ -366,7 +387,9 @@ where
         self.send_command::<8>(Command::FmRsqStatus as u8, &[arg1]).await
     }
 
-    /// AM_TUNE_FREQ (0x40). `freq_khz` is in kHz.
+    /// Tunes the AM/SW/LW receive to a frequency between 149 and 23 MHz in 1 kHz steps.
+    /// 
+    /// AN332 (REV 1.0); page 135    
     pub async fn set_am_tune_freq(
         &mut self,
         freq_khz: u16,
@@ -385,7 +408,9 @@ where
         Ok(AmReceiverStatus::from_bits(r[0]).unwrap_or(AmReceiverStatus::empty()))
     }
 
-    /// AM_TUNE_STATUS (0x42)
+    /// Returns the status of AM_TUNE_FREQ or AM_SEEK_START commands.
+    /// 
+    /// AN332 (REV 1.0); page 139    
     pub async fn am_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
         self.send_command::<8>(Command::AmTuneStatus as u8, &[arg1]).await
