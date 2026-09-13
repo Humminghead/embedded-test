@@ -48,7 +48,9 @@ const FM_BAND_HIGH: u16 = 10800;
 const FM_STEP_10KHZ: u16 = 10; // 100 kHz
 
 // RSSI threshold (dBuV) to declare a valid station and stop the scan.
-const FM_RSSI_LOCK_THRESHOLD: u8 = 10;
+// Default value is 20 dBµV.
+// AN332 page 58 (FM_SEEK_TUNE_RSSI_TRESHOLD) 
+const FM_RSSI_LOCK_THRESHOLD: u8 = 20;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 // 40 attempts × 5 ms = 200 ms budget.
@@ -157,7 +159,7 @@ async fn main(_s: Spawner) {
     let _ = device
         .set_property(
             si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation as u16,
-            10,
+            10 as u16,
         )
         .await;
 
