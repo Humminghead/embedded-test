@@ -10,8 +10,7 @@
             "request": "launch",
             "name": "probe-rs-debug",
             "cwd": "${workspaceFolder}",
-            "connectUnderReset": false,
-            // "chip": "STM32F303VCTx",
+            "connectUnderReset": false,           
             "chip": "STM32F103C8",
             "probe": "0483:3748",
             "flashingConfig": {
@@ -19,14 +18,13 @@
                 "haltAfterReset": false
             },
             "env": {
-                // "DEFMT_LOG": "trace",
-                // "RUST_LOG":"error"
+                // "NAME": "VALUE",                
             },
             "consoleLogLevel": "Console",
             "coreConfigs": [
                 {
                     "coreIndex": 0,
-                    "programBinary": "./target/thumbv7em-none-eabi/debug/test_out_stm32f103c8",
+                    "programBinary": "./target/thumbv7m-none-eabi/debug/test_out_stm32f103c8",
                     "svdFile": "./svd/STM32F103.svd" 
                 }
             ]
