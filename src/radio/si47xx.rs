@@ -211,6 +211,8 @@ pub struct RevisionResponse {
     pub chiprev: u8,
 }
 
+const NO_ARGS: &[u8;0] = &[];
+
 impl RevisionResponse {
     fn ascii_digit_to_u8(digit: &u8) -> u8 {
         if digit.is_ascii_digit() {
@@ -288,13 +290,13 @@ where
             .await?;
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
-
+    
     /// Updates bits 6:0 of the status byte.
     /// 
     /// AN332 (REV 1.0); page 70
     pub async fn get_int_status(&mut self) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
-            .send_command::<1>(Command::GetIntStatus as u8, &[])
+            .send_command::<1>(Command::GetIntStatus as u8, NO_ARGS.as_slice())
             .await?;
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
@@ -304,7 +306,7 @@ where
     /// AN332 (REV 1.0); page 67
     pub async fn power_down(&mut self) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
-            .send_command::<1>(Command::PowerDown as u8, &[])
+            .send_command::<1>(Command::PowerDown as u8, NO_ARGS.as_slice())
             .await?;
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
@@ -313,7 +315,7 @@ where
     /// 
     /// AN332 (REV 1.0); page 66
     pub async fn get_rev_info(&mut self) -> Result<RevisionResponse, ReceiverError<E>> {
-        let data = self.send_command::<9>(Command::GetRev as u8, &[]).await?;
+        let data = self.send_command::<9>(Command::GetRev as u8, NO_ARGS.as_slice()).await?;
 
         if !is_bus_cts(data[0]) {
             return Err(ReceiverError::CtsTimeout);
@@ -322,7 +324,7 @@ where
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(&data[1..]);
 
-        RevisionResponse::from_bytes(&bytes).map_err(|_| ReceiverError::InvalidArg)
+        RevisionResponse::from_bytes(&bytes.as_mut_slice()).map_err(|_| ReceiverError::InvalidArg)
     }
 
     /// Sets a property shown in Table 9, “FM/RDS Receiver Property Summary,” on AN332 page 56.
