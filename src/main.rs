@@ -98,7 +98,7 @@ async fn main(_s: Spawner) {
 
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
-        error_loop(&mut led_pin, &CODE_RESET_ERR).await;
+        error_loop(&mut led_pin, &CODE_RESET_ERR[..]).await;
     }
 
     // Power up in FM receive mode with analog audio out
@@ -107,11 +107,11 @@ async fn main(_s: Spawner) {
         .await
     {
         Ok(s) => s,
-        Err(_) => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await,
+        Err(_) => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR[..]).await,
     };
 
     if si47xx::is_bus_error(status.bits()) {
-        error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await;
+        error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR[..]).await;
     }
 
     // tCTS for POWER_UP is 110 ms; wait a bit extra for the crystal to settle (XOSCEN = 1).
@@ -151,7 +151,7 @@ async fn main(_s: Spawner) {
     {
         if !is_bus_cts(res.bits()) {
             error!("GPO_IEN did not return CTS");
-            error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+            error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR[..]).await;
         }
     }
 
@@ -241,7 +241,7 @@ async fn main(_s: Spawner) {
                 FM_RSSI_LOCK_THRESHOLD
             );
 
-            error_loop(&mut led_pin, &CODE_FM_NO_STATION_FOUND).await;
+            error_loop(&mut led_pin, &CODE_FM_NO_STATION_FOUND[..]).await;
         }
     }
 
@@ -249,6 +249,6 @@ async fn main(_s: Spawner) {
     let _ = device.power_down().await;
 
     loop {
-        flash_signal(&mut led_pin, &[BLINK_LONG]).await;
+        flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
     }
 }
