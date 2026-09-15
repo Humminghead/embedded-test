@@ -10,9 +10,18 @@ use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::i2c::I2c;
 use embassy_stm32::peripherals::I2C2;
+use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::Timer;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::{Baseline, Text},
+};
 use embedded_hal::digital::OutputPin;
+use embedded_hal_bus::{i2c::AtomicDevice, util::AtomicCell};
 use panic_probe as _;
+use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 mod radio;
 
 bind_interrupts!(
@@ -49,7 +58,7 @@ const FM_STEP_10KHZ: u16 = 10; // 100 kHz
 
 // RSSI threshold (dBuV) to declare a valid station and stop the scan.
 // Default value is 20 dBµV.
-// AN332 page 58 (FM_SEEK_TUNE_RSSI_TRESHOLD) 
+// AN332 page 58 (FM_SEEK_TUNE_RSSI_TRESHOLD)
 const FM_RSSI_LOCK_THRESHOLD: u8 = 20;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
@@ -93,8 +102,27 @@ async fn main(_s: Spawner) {
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
+    // Create I2C bus
     let i2c = I2c::new_no_dma(p.I2C2, p.PB10, p.PB11, Irqs, Default::default());
-    let mut device = si47xx::FmReceiver::new(i2c, I2C_ADDR_SEN_1);
+    let i2c_bus = AtomicCell::new(i2c);
+
+    // Give the radio a view of the bus
+    let radio_bus = AtomicDevice::new(&i2c_bus);
+    let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
+
+    // Give the display a view of the bus
+    let display_bus = AtomicDevice::new(&i2c_bus);
+    let interface = I2CDisplayInterface::new(display_bus);
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+
+    let text_style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
+    // Init the display
+    display.init().unwrap();
 
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
