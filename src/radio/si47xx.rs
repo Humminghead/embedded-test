@@ -269,7 +269,7 @@ where
 
         let mut response = [0u8; N];
         self.bus
-            .write_read(self.address, &buf[..1 + arg_len], &mut response)
+            .write_read(self.address, &buf[..1 + arg_len],  response.as_mut_slice())
             .map_err(ReceiverError::I2c)?;
 
         Ok(response)
@@ -277,14 +277,14 @@ where
 
     /// Initiates the boot process to move the device from powerdown to powerup mode
     /// 
-    /// AN332 (REV 1.0); page 12
+    /// AN332 (REV 1.0); page 64
     pub async fn power_up(
         &mut self,
         arg1: u8,
         arg2: OptMode,
     ) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
-            .send_command::<1>(Command::PowerUp as u8, &[arg1, arg2 as u8])
+            .send_command::<1>(Command::PowerUp as u8, [arg1 as u8, arg2 as u8].as_mut_slice())
             .await?;
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
@@ -342,7 +342,7 @@ where
         ];
 
         let result = self
-            .send_command::<1>(Command::SetProperty as u8, &args)
+            .send_command::<1>(Command::SetProperty as u8, args.as_slice())
             .await?;
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
@@ -359,7 +359,7 @@ where
         ];
 
         let result = self
-            .send_command::<1>(Command::FmTuneFreq as u8, &args)
+            .send_command::<1>(Command::FmTuneFreq as u8, args.as_slice())
             .await?;
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
@@ -373,7 +373,7 @@ where
     ///   [4] RSSI, [5] SNR, [6] MULT, [7] READANTCAP
     pub async fn fm_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        self.send_command::<8>(Command::FmTuneStatus as u8, &[arg1]).await
+        self.send_command::<8>(Command::FmTuneStatus as u8, [arg1].as_slice()).await
     }
 
     /// Returns status information about the received signal quality.
@@ -384,7 +384,7 @@ where
     ///   [4] RSSI, [5] SNR, [6] MULT, [7] FREQOFF
     pub async fn fm_rsq_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        self.send_command::<8>(Command::FmRsqStatus as u8, &[arg1]).await
+        self.send_command::<8>(Command::FmRsqStatus as u8, [arg1].as_slice()).await
     }
 
     /// Tunes the AM/SW/LW receive to a frequency between 149 and 23 MHz in 1 kHz steps.
@@ -403,7 +403,7 @@ where
         ];
 
         let r = self
-            .send_command::<1>(Command::AmTuneFreq as u8, &args)
+            .send_command::<1>(Command::AmTuneFreq as u8, args.as_slice())
             .await?;
         Ok(AmReceiverStatus::from_bits(r[0]).unwrap_or(AmReceiverStatus::empty()))
     }
@@ -413,6 +413,6 @@ where
     /// AN332 (REV 1.0); page 139    
     pub async fn am_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        self.send_command::<8>(Command::AmTuneStatus as u8, &[arg1]).await
+        self.send_command::<8>(Command::AmTuneStatus as u8, [arg1].as_slice()).await
     }
 }
