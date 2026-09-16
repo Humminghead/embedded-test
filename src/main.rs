@@ -20,6 +20,7 @@ use embedded_graphics::{
 };
 use embedded_hal::digital::OutputPin;
 use embedded_hal_bus::{i2c::AtomicDevice, util::AtomicCell};
+use heapless::String;
 use panic_probe as _;
 use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 mod radio;
@@ -88,6 +89,13 @@ async fn reset_i2c_device<P: OutputPin>(pin: &mut P) -> bool {
     true
 }
 
+async fn display_reset<P: OutputPin>(pin: &mut P) -> Result<(), P::Error> {
+    pin.set_low()?;
+    Timer::after_millis(250).await;
+    
+    pin.set_high()
+}
+
 async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
     loop {
         Timer::after_secs(RESTART_TIME_SEC).await;
@@ -99,7 +107,8 @@ async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
 async fn main(_s: Spawner) {
     let p = embassy_stm32::init(Default::default());
 
-    let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
+    // let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
+    let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
     // Create I2C bus
@@ -107,8 +116,8 @@ async fn main(_s: Spawner) {
     let i2c_bus = AtomicCell::new(i2c);
 
     // Give the radio a view of the bus
-    let radio_bus = AtomicDevice::new(&i2c_bus);
-    let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
+    //let radio_bus = AtomicDevice::new(&i2c_bus);
+    //let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
 
     // Give the display a view of the bus
     let display_bus = AtomicDevice::new(&i2c_bus);
@@ -116,14 +125,38 @@ async fn main(_s: Spawner) {
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
 
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
-        .text_color(BinaryColor::On)
-        .build();
+    let text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor> =
+        MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::On)
+            .build();
 
     // Init the display
-    display.init().unwrap();
+    display_reset(&mut display_rst_pin).await;
+    Timer::after_millis(250).await;
 
+    match display.init() {
+        Ok(_) => {}
+        Err(_e) => {
+            error_loop(
+                &mut led_pin,
+                [BLINK_SHORT, BLINK_SHORT, BLINK_SHORT].as_slice(),
+            )
+            .await;
+        }
+    }
+
+    Text::with_baseline("Hello Rust!", Point::new(0,16), text_style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+
+    display.flush().unwrap();
+
+    loop {
+        flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
+    }
+}
+/*
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
         error_loop(&mut led_pin, &CODE_RESET_ERR[..]).await;
@@ -280,3 +313,4 @@ async fn main(_s: Spawner) {
         flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
     }
 }
+ */
