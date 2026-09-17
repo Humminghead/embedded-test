@@ -3,6 +3,7 @@
 
 use crate::radio::si47xx::{self, is_bus_cts, PowerUpArg};
 
+use core::fmt::Write;
 use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
@@ -92,7 +93,7 @@ async fn reset_i2c_device<P: OutputPin>(pin: &mut P) -> bool {
 async fn display_reset<P: OutputPin>(pin: &mut P) -> Result<(), P::Error> {
     pin.set_low()?;
     Timer::after_millis(250).await;
-    
+
     pin.set_high()
 }
 
@@ -107,7 +108,7 @@ async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
 async fn main(_s: Spawner) {
     let p = embassy_stm32::init(Default::default());
 
-    // let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
+    let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
     let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
@@ -116,8 +117,8 @@ async fn main(_s: Spawner) {
     let i2c_bus = AtomicCell::new(i2c);
 
     // Give the radio a view of the bus
-    //let radio_bus = AtomicDevice::new(&i2c_bus);
-    //let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
+    let radio_bus = AtomicDevice::new(&i2c_bus);
+    let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
 
     // Give the display a view of the bus
     let display_bus = AtomicDevice::new(&i2c_bus);
@@ -146,17 +147,17 @@ async fn main(_s: Spawner) {
         }
     }
 
-    Text::with_baseline("Hello Rust!", Point::new(0,16), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
+    Text::with_baseline(
+        "PowerUP the radio!",
+        Point::new(0, 16),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(&mut display)
+    .unwrap();
 
     display.flush().unwrap();
 
-    loop {
-        flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
-    }
-}
-/*
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
         error_loop(&mut led_pin, &CODE_RESET_ERR[..]).await;
@@ -238,6 +239,7 @@ async fn main(_s: Spawner) {
 
         // Wait for STCINT
         let mut attempts = 0u32;
+        let mut line: String<32> = String::new();
         loop {
             let s = match device.get_int_status().await {
                 Ok(s) => s,
@@ -266,6 +268,24 @@ async fn main(_s: Spawner) {
                 "READFREQ={} RSSI={} SNR={} VALID={}",
                 freq, rssi, snr, valid
             );
+
+            write!(
+                &mut line,
+                "{}.{}kHz {}dB {}dB {}",
+                freq / 100,
+                freq - ((freq / 100) * 100),
+                rssi,
+                snr,
+                if valid { "OK" } else { "--" }
+            )
+            .unwrap();
+
+            display.clear_buffer();
+            Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
+                .draw(&mut display)
+                .unwrap();
+            display.flush().unwrap();
+            line.clear();
 
             if valid && rssi >= FM_RSSI_LOCK_THRESHOLD {
                 info!(
@@ -309,8 +329,18 @@ async fn main(_s: Spawner) {
     Timer::after_secs(10).await;
     let _ = device.power_down().await;
 
+    display.clear_buffer();
+    Text::with_baseline(
+        "Radio is off!",
+        Point::new(0, 16),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(&mut display)
+    .unwrap();
+    display.flush().unwrap();
+
     loop {
         flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
     }
 }
- */
