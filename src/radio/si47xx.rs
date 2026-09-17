@@ -172,6 +172,11 @@ pub enum Function {
     QueryLibId = 15,
 }
 
+pub enum SeekDirection {
+    PowerDown = 0,
+    Up = 1,
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum OptMode {
@@ -290,7 +295,7 @@ where
             .await?;
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
-    
+
     /// Updates bits 6:0 of the status byte.
     /// 
     /// AN332 (REV 1.0); page 70
@@ -366,7 +371,22 @@ where
         Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
-    
+    /// Begins searching for a valid frequency. Clears any pending STCINT or RSQINT interrupt status.
+    ///     
+    /// AN332 (REV 1.0); page 72
+    pub async fn fm_seek_start(
+        &mut self,        
+        dir: SeekDirection,
+        wrap: bool,
+    ) -> Result<ReceiverStatus, ReceiverError<E>> {
+        let args: [u8; 1] = [(dir as u8) << 3 | (wrap as u8) << 2];
+
+        let result = self
+            .send_command::<1>(Command::FmSeekStart as u8, args.as_slice())
+            .await?;
+        Ok(ReceiverStatus::from_bits(result[0]).unwrap_or(ReceiverStatus::empty()))
+    }
+
     /// Returns the status of FM_TUNE_FREQ or FM_SEEK_START commands.
     /// 
     /// AN332 (REV 1.0); page 73
