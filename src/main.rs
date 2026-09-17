@@ -3,6 +3,7 @@
 
 use crate::radio::si47xx::{self, is_bus_cts, PowerUpArg};
 
+use core::fmt::Write;
 use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
@@ -10,9 +11,19 @@ use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::i2c::I2c;
 use embassy_stm32::peripherals::I2C2;
+use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::Timer;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::{Baseline, Text},
+};
 use embedded_hal::digital::OutputPin;
+use embedded_hal_bus::{i2c::AtomicDevice, util::AtomicCell};
+use heapless::String;
 use panic_probe as _;
+use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 mod radio;
 
 bind_interrupts!(
@@ -49,7 +60,7 @@ const FM_STEP_10KHZ: u16 = 10; // 100 kHz
 
 // RSSI threshold (dBuV) to declare a valid station and stop the scan.
 // Default value is 20 dBµV.
-// AN332 page 58 (FM_SEEK_TUNE_RSSI_TRESHOLD) 
+// AN332 page 58 (FM_SEEK_TUNE_RSSI_TRESHOLD)
 const FM_RSSI_LOCK_THRESHOLD: u8 = 20;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
@@ -79,6 +90,13 @@ async fn reset_i2c_device<P: OutputPin>(pin: &mut P) -> bool {
     true
 }
 
+async fn display_reset<P: OutputPin>(pin: &mut P) -> Result<(), P::Error> {
+    pin.set_low()?;
+    Timer::after_millis(250).await;
+
+    pin.set_high()
+}
+
 async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
     loop {
         Timer::after_secs(RESTART_TIME_SEC).await;
@@ -91,10 +109,54 @@ async fn main(_s: Spawner) {
     let p = embassy_stm32::init(Default::default());
 
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
+    let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
+    // Create I2C bus
     let i2c = I2c::new_no_dma(p.I2C2, p.PB10, p.PB11, Irqs, Default::default());
-    let mut device = si47xx::FmReceiver::new(i2c, I2C_ADDR_SEN_1);
+    let i2c_bus = AtomicCell::new(i2c);
+
+    // Give the radio a view of the bus
+    let radio_bus = AtomicDevice::new(&i2c_bus);
+    let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
+
+    // Give the display a view of the bus
+    let display_bus = AtomicDevice::new(&i2c_bus);
+    let interface = I2CDisplayInterface::new(display_bus);
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+
+    let text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor> =
+        MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::On)
+            .build();
+
+    // Init the display
+    display_reset(&mut display_rst_pin).await;
+    Timer::after_millis(250).await;
+
+    match display.init() {
+        Ok(_) => {}
+        Err(_e) => {
+            error_loop(
+                &mut led_pin,
+                [BLINK_SHORT, BLINK_SHORT, BLINK_SHORT].as_slice(),
+            )
+            .await;
+        }
+    }
+
+    Text::with_baseline(
+        "PowerUP the radio!",
+        Point::new(0, 16),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(&mut display)
+    .unwrap();
+
+    display.flush().unwrap();
 
     // Reset the device
     if !reset_i2c_device(&mut dev_rst_pin).await {
@@ -177,6 +239,7 @@ async fn main(_s: Spawner) {
 
         // Wait for STCINT
         let mut attempts = 0u32;
+        let mut line: String<32> = String::new();
         loop {
             let s = match device.get_int_status().await {
                 Ok(s) => s,
@@ -205,6 +268,24 @@ async fn main(_s: Spawner) {
                 "READFREQ={} RSSI={} SNR={} VALID={}",
                 freq, rssi, snr, valid
             );
+
+            write!(
+                &mut line,
+                "{}.{}kHz {}dB {}dB {}",
+                freq / 100,
+                freq - ((freq / 100) * 100),
+                rssi,
+                snr,
+                if valid { "OK" } else { "--" }
+            )
+            .unwrap();
+
+            display.clear_buffer();
+            Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
+                .draw(&mut display)
+                .unwrap();
+            display.flush().unwrap();
+            line.clear();
 
             if valid && rssi >= FM_RSSI_LOCK_THRESHOLD {
                 info!(
@@ -247,6 +328,17 @@ async fn main(_s: Spawner) {
 
     Timer::after_secs(10).await;
     let _ = device.power_down().await;
+
+    display.clear_buffer();
+    Text::with_baseline(
+        "Radio is off!",
+        Point::new(0, 16),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(&mut display)
+    .unwrap();
+    display.flush().unwrap();
 
     loop {
         flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
