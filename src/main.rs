@@ -7,11 +7,10 @@ use core::fmt::Write;
 use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_stm32::bind_interrupts;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::i2c::I2c;
 use embassy_stm32::peripherals::I2C2;
-use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
+use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::Timer;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
@@ -23,13 +22,15 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal_bus::{i2c::AtomicDevice, util::AtomicCell};
 use heapless::String;
 use panic_probe as _;
-use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
+use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 mod radio;
 
 bind_interrupts!(
     struct Irqs {
         I2C2_EV => embassy_stm32::i2c::EventInterruptHandler<I2C2>;
         I2C2_ER => embassy_stm32::i2c::ErrorInterruptHandler<I2C2>;
+        DMA1_CHANNEL4 => dma::InterruptHandler<peripherals::DMA1_CH4>;
+        DMA1_CHANNEL5 => dma::InterruptHandler<peripherals::DMA1_CH5>;
     }
 );
 
@@ -113,7 +114,15 @@ async fn main(_s: Spawner) {
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
     // Create I2C bus
-    let i2c = I2c::new_no_dma(p.I2C2, p.PB10, p.PB11, Irqs, Default::default());
+    let i2c = I2c::new(
+        p.I2C2,
+        p.PB10,
+        p.PB11,
+        p.DMA1_CH4,
+        p.DMA1_CH5,
+        Irqs,
+        Default::default(),
+    );
     let i2c_bus = AtomicCell::new(i2c);
 
     // Give the radio a view of the bus
