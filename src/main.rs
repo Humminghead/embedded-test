@@ -159,6 +159,27 @@ where
     Some(fm_status)
 }
 
+async fn print_fm_info(freq: u16, valid: bool, rssi: u8, snr: u8, display:) {
+    let mut line: String<32> = String::new();
+    write!(
+        &mut line,
+        "{}.{}kHz {}dB {}dB {}",
+        freq / 100,
+        freq - ((freq / 100) * 100),
+        rssi,
+        snr,
+        if valid { "OK" } else { "--" }
+    )
+    .unwrap();
+
+    display.clear_buffer();
+    Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+    display.flush().unwrap();
+    line.clear();
+}
+
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
     let p = embassy_stm32::init(Default::default());
@@ -295,28 +316,16 @@ async fn main(_s: Spawner) {
         error_loop(&mut led_pin, CODE_FM_NO_STATION_FOUND.as_slice()).await;
     }
 
-    let (freq,valid,rssi,snr) = res.unwrap();
+    // Get FM station status
+    let (freq, valid, rssi, snr) = res.unwrap();
 
-    let mut line: String<32> = String::new();
-    write!(
-        &mut line,
-        "{}.{}kHz {}dB {}dB {}",
-        freq / 100,
-        freq - ((freq / 100) * 100),
-        rssi,
-        snr,
-        if valid { "OK" } else { "--" }
-    )
-    .unwrap();
+    // Print at the display
+    print_fm_info(freq, valid, rssi, snr, display).await;
 
-    display.clear_buffer();
-    Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-    display.flush().unwrap();
-    line.clear();
-
+    // Emulate job
     Timer::after_secs(10).await;
+
+    // Power down
     let _ = device.power_down().await;
 
     display.clear_buffer();
