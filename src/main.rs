@@ -105,6 +105,81 @@ async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
     }
 }
 
+async fn seek_fm_station<I2C, E>(dev: &mut si47xx::FmReceiver<I2C>) -> Option<(u16, bool, u8, u8)>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+{
+    let mut fm_status: (u16, bool, u8, u8) = (0, false, 0, 0);
+    let mut attempts = 0u32;
+
+    if dev
+        .fm_seek_start(si47xx::SeekDirection::Up, false)
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    // Wait for STCINT
+    loop {
+        let s = match dev.get_int_status().await {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+        if s.contains(si47xx::ReceiverStatus::STCINT) {
+            break;
+        }
+        attempts += 1;
+        if attempts > STC_MAX_ATTEMPTS {
+            return None;
+        }
+        Timer::after_millis(STC_POLL_MS).await;
+    }
+
+    //    device.get_int_status().await
+    match dev.fm_tune_status(true).await {
+        Ok(resp) => {
+            //freq
+            fm_status.0 = ((resp[2] as u16) << 8) | resp[3] as u16;
+
+            //valid
+            fm_status.1 = (resp[1] & 0x01) != 0;
+
+            // rssi
+            fm_status.2 = resp[4];
+
+            // snr
+            fm_status.3 = resp[5];
+        }
+        Err(_) => {
+            return None;
+        }
+    }
+
+    Some(fm_status)
+}
+
+async fn print_fm_info(freq: u16, valid: bool, rssi: u8, snr: u8, display:) {
+    let mut line: String<32> = String::new();
+    write!(
+        &mut line,
+        "{}.{}kHz {}dB {}dB {}",
+        freq / 100,
+        freq - ((freq / 100) * 100),
+        rssi,
+        snr,
+        if valid { "OK" } else { "--" }
+    )
+    .unwrap();
+
+    display.clear_buffer();
+    Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
+        .draw(&mut display)
+        .unwrap();
+    display.flush().unwrap();
+    line.clear();
+}
+
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
     let p = embassy_stm32::init(Default::default());
@@ -234,108 +309,23 @@ async fn main(_s: Spawner) {
         )
         .await;
 
-    // Scan the FM band for a station above the RSSI threshold
-    let mut locked: Option<(u16, u8, u8)> = None; // (freq_10khz, rssi, snr)
-    let mut tune_freq = FM_BAND_LOW;
+    // Seek the FM band
+    let res: Option<(u16, bool, u8, u8)> = seek_fm_station(&mut device).await;
 
-    while tune_freq <= FM_BAND_HIGH {
-        // Issue tune
-        if device.set_tune_freq(tune_freq).await.is_err() {
-            error!("FM_TUNE_FREQ i2c error @ {}", tune_freq);
-            tune_freq += FM_STEP_10KHZ;
-            continue;
-        }
-
-        // Wait for STCINT
-        let mut attempts = 0u32;
-        let mut line: String<32> = String::new();
-        loop {
-            let s = match device.get_int_status().await {
-                Ok(s) => s,
-                Err(_) => break,
-            };
-            if s.contains(si47xx::ReceiverStatus::STCINT) {
-                break;
-            }
-            attempts += 1;
-            if attempts > STC_MAX_ATTEMPTS {
-                error!("STCINT timeout @ {}", tune_freq);
-                // error_loop(&mut led_pin, &CODE_IIC_STCINT_ERR).await;
-                break;
-            }
-            Timer::after_millis(STC_POLL_MS).await;
-        }
-
-        // Read status (also clears STCINT via INTACK)
-        if let Ok(resp) = device.fm_tune_status(true).await {
-            let freq = ((resp[2] as u16) << 8) | resp[3] as u16;
-            let valid = (resp[1] & 0x01) != 0;
-            let rssi = resp[4];
-            let snr = resp[5];
-
-            info!(
-                "READFREQ={} RSSI={} SNR={} VALID={}",
-                freq, rssi, snr, valid
-            );
-
-            write!(
-                &mut line,
-                "{}.{}kHz {}dB {}dB {}",
-                freq / 100,
-                freq - ((freq / 100) * 100),
-                rssi,
-                snr,
-                if valid { "OK" } else { "--" }
-            )
-            .unwrap();
-
-            display.clear_buffer();
-            Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
-                .draw(&mut display)
-                .unwrap();
-            display.flush().unwrap();
-            line.clear();
-
-            if valid && rssi >= FM_RSSI_LOCK_THRESHOLD {
-                info!(
-                    "Locked on {} kHz (RSSI={} dBuV, SNR={} dB)",
-                    freq as u32 * 10,
-                    rssi,
-                    snr
-                );
-                locked = Some((freq, rssi, snr));
-                break;
-            }
-        }
-
-        tune_freq += FM_STEP_10KHZ;
+    if res.is_none() {
+        error_loop(&mut led_pin, CODE_FM_NO_STATION_FOUND.as_slice()).await;
     }
 
-    // Read RSQ on the locked channel, if any
-    match locked {
-        Some((freq, _, _)) => {
-            if let Ok(resp) = device.fm_rsq_status(true).await {
-                info!(
-                    "RSQ @ {} kHz: RSSI={} dBuV SNR={} dB MULT={} STBLEND={}",
-                    freq as u32 * 10,
-                    resp[4],
-                    resp[5],
-                    resp[6],
-                    resp[7]
-                );
-            }
-        }
-        None => {
-            error!(
-                "No station above {} dBuV found in 87.5 - 108.0 MHz",
-                FM_RSSI_LOCK_THRESHOLD
-            );
+    // Get FM station status
+    let (freq, valid, rssi, snr) = res.unwrap();
 
-            error_loop(&mut led_pin, &CODE_FM_NO_STATION_FOUND[..]).await;
-        }
-    }
+    // Print at the display
+    print_fm_info(freq, valid, rssi, snr, display).await;
 
+    // Emulate job
     Timer::after_secs(10).await;
+
+    // Power down
     let _ = device.power_down().await;
 
     display.clear_buffer();
