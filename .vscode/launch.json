@@ -10,9 +10,9 @@
             "request": "launch",
             "name": "probe-rs-debug",
             "cwd": "${workspaceFolder}",
-            "connectUnderReset": false,           
-            "chip": "STM32F103C8",
-            "probe": "0483:3748",
+            "connectUnderReset": false,                       
+            "chip": "STM32F303VC",
+            "probe": "0483:374b",
             "flashingConfig": {
                 "flashingEnabled": true,
                 "haltAfterReset": false
@@ -23,9 +23,9 @@
             "consoleLogLevel": "Console",
             "coreConfigs": [
                 {
-                    "coreIndex": 0,
-                    "programBinary": "./target/thumbv7m-none-eabi/debug/test_out_stm32f103c8",
-                    "svdFile": "./svd/STM32F103.svd" 
+                    "coreIndex": 0,                    
+                    "programBinary": "./target/thumbv7em-none-eabihf/debug/test_out_stm32f103c8",
+                    "svdFile": "./svd/STM32F303.svd" 
                 }
             ]
         }

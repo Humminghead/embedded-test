@@ -1,10 +1,19 @@
 [build]
-target = "thumbv7m-none-eabi"
+target = "thumbv7em-none-eabihf"
 
 [env]
 DEFMT_LOG = "info"
 
+# core without a hardware FPU
 [target.thumbv7m-none-eabi]
+rustflags = [
+  "-C", "linker=arm-none-eabi-gcc",
+  "-C", "link-arg=-nostartfiles",
+  "-C", "relocation-model=static",
+]
+
+# core with a hardware FPU
+[target.thumbv7em-none-eabihf]
 rustflags = [
   "-C", "linker=arm-none-eabi-gcc",
   "-C", "link-arg=-nostartfiles",

@@ -13,7 +13,7 @@ use embassy_stm32::peripherals::I2C2;
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::Timer;
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    mono_font::{ascii::FONT_6X10, MonoTextStyle, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
     prelude::*,
     text::{Baseline, Text},
@@ -191,8 +191,8 @@ async fn main(_s: Spawner) {
     // Create I2C bus
     let i2c = I2c::new(
         p.I2C2,
-        p.PB10,
-        p.PB11,
+        p.PA9,
+        p.PA10,
         p.DMA1_CH4,
         p.DMA1_CH5,
         Irqs,
