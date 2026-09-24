@@ -13,7 +13,7 @@ use embassy_stm32::peripherals::I2C2;
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::Timer;
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    mono_font::{ascii::FONT_6X10, MonoTextStyle, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
     prelude::*,
     text::{Baseline, Text},
@@ -159,25 +159,30 @@ where
     Some(fm_status)
 }
 
-async fn print_fm_info(freq: u16, valid: bool, rssi: u8, snr: u8, display:) {
+fn print_fm_info(
+    freq: u16,
+    valid: bool,
+    rssi: u8,
+    snr: u8,
+    display: &mut impl DrawTarget<Color = BinaryColor>,
+    text_style: MonoTextStyle<'_, BinaryColor>,
+) {
     let mut line: String<32> = String::new();
+
     write!(
         &mut line,
         "{}.{}kHz {}dB {}dB {}",
         freq / 100,
-        freq - ((freq / 100) * 100),
+        freq % 100,
         rssi,
         snr,
         if valid { "OK" } else { "--" }
     )
-    .unwrap();
+    .ok();
 
-    display.clear_buffer();
     Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-    display.flush().unwrap();
-    line.clear();
+        .draw(display)
+        .ok();
 }
 
 #[embassy_executor::main]
@@ -191,8 +196,8 @@ async fn main(_s: Spawner) {
     // Create I2C bus
     let i2c = I2c::new(
         p.I2C2,
-        p.PB10,
-        p.PB11,
+        p.PA9,
+        p.PA10,
         p.DMA1_CH4,
         p.DMA1_CH5,
         Irqs,
@@ -320,7 +325,7 @@ async fn main(_s: Spawner) {
     let (freq, valid, rssi, snr) = res.unwrap();
 
     // Print at the display
-    print_fm_info(freq, valid, rssi, snr, display).await;
+    print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
 
     // Emulate job
     Timer::after_secs(10).await;
