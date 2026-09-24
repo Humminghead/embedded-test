@@ -31,7 +31,7 @@ static_cell = "2.0.0"
 critical-section = "1.1"
 ssd1306="0.10.0"
 embedded-graphics = "0.8"
-embedded-hal-bus = "0.2"
+embedded-hal-bus = "0.3.0"
 
 [profile.dev]
 opt-level = "s"
