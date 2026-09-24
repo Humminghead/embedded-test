@@ -159,25 +159,30 @@ where
     Some(fm_status)
 }
 
-async fn print_fm_info(freq: u16, valid: bool, rssi: u8, snr: u8, display:) {
+fn print_fm_info(
+    freq: u16,
+    valid: bool,
+    rssi: u8,
+    snr: u8,
+    display: &mut impl DrawTarget<Color = BinaryColor>,
+    text_style: MonoTextStyle<'_, BinaryColor>,
+) {
     let mut line: String<32> = String::new();
+
     write!(
         &mut line,
         "{}.{}kHz {}dB {}dB {}",
         freq / 100,
-        freq - ((freq / 100) * 100),
+        freq % 100,
         rssi,
         snr,
         if valid { "OK" } else { "--" }
     )
-    .unwrap();
+    .ok();
 
-    display.clear_buffer();
     Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-    display.flush().unwrap();
-    line.clear();
+        .draw(display)
+        .ok();
 }
 
 #[embassy_executor::main]
@@ -320,7 +325,7 @@ async fn main(_s: Spawner) {
     let (freq, valid, rssi, snr) = res.unwrap();
 
     // Print at the display
-    print_fm_info(freq, valid, rssi, snr, display).await;
+    print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
 
     // Emulate job
     Timer::after_secs(10).await;
