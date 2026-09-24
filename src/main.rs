@@ -54,16 +54,6 @@ static RESTART_TIME_SEC: u64 = 2;
 const POWER_UP_ARG1_FM: u8 =
     (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
 
-// FM band, in 10 kHz units. 8750 = 87.5 MHz, 10800 = 108.0 MHz.
-const FM_BAND_LOW: u16 = 8750;
-const FM_BAND_HIGH: u16 = 10800;
-const FM_STEP_10KHZ: u16 = 10; // 100 kHz
-
-// RSSI threshold (dBuV) to declare a valid station and stop the scan.
-// Default value is 20 dBµV.
-// AN332 page 58 (FM_SEEK_TUNE_RSSI_TRESHOLD)
-const FM_RSSI_LOCK_THRESHOLD: u8 = 20;
-
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 // 40 attempts × 5 ms = 200 ms budget.
 const STC_POLL_MS: u64 = 5;
@@ -157,6 +147,16 @@ where
     }
 
     Some(fm_status)
+}
+
+fn print_yellow_message(
+    line: &str,
+    display: &mut impl DrawTarget<Color = BinaryColor>,
+    text_style: MonoTextStyle<'_, BinaryColor>,
+) {
+    Text::with_baseline(&line, Point::new(0, 0), text_style, Baseline::Top)
+        .draw(display)
+        .ok();
 }
 
 fn print_fm_info(
@@ -318,17 +318,25 @@ async fn main(_s: Spawner) {
     let res: Option<(u16, bool, u8, u8)> = seek_fm_station(&mut device).await;
 
     if res.is_none() {
-        error_loop(&mut led_pin, CODE_FM_NO_STATION_FOUND.as_slice()).await;
+        flash_signal(&mut led_pin, CODE_FM_NO_STATION_FOUND.as_slice()).await;
+        display.clear_buffer();
+        print_yellow_message("No stations found!", &mut display, text_style);
+        display.flush().unwrap();
+
+        // Show message
+        Timer::after_secs(1).await;
+    } else {
+        // Get FM station status
+        let (freq, valid, rssi, snr) = res.unwrap();
+
+        // Print at the display
+        display.clear_buffer();
+        print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
+        display.flush().unwrap();
+        
+        // Emulate job
+        Timer::after_secs(10).await;
     }
-
-    // Get FM station status
-    let (freq, valid, rssi, snr) = res.unwrap();
-
-    // Print at the display
-    print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
-
-    // Emulate job
-    Timer::after_secs(10).await;
 
     // Power down
     let _ = device.power_down().await;
