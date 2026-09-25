@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use crate::radio::si47xx::{self, FmRsqIntSource, GpoIen, PowerUpArg, is_bus_cts};
+use crate::radio::si47xx::{self, is_bus_cts, FmRsqIntSource, GpoIen, PowerUpArg};
 
 use core::fmt::Write;
 use defmt::{error, info};
@@ -115,6 +115,28 @@ where
     Err(si47xx::ReceiverError::CtsTimeout)
 }
 
+/// Send a SET_PROPERTY command and wait for CTS to be set.
+async fn set_property_and_wait<I2C, E>(
+    dev: &mut si47xx::FmReceiver<I2C>,
+    prop: si47xx::ReceiverProperties,
+    value: u16,
+) -> Result<(), si47xx::ReceiverError<E>>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+{
+    dev.set_property(prop as u16, value).await?;
+
+    // Wait for CTS, up to ~100 ms
+    for _ in 0..100 {
+        let status = dev.get_int_status().await?;
+        if status.contains(si47xx::ReceiverStatus::CTS) {
+            return Ok(());
+        }
+        Timer::after_millis(1).await;
+    }
+    Err(si47xx::ReceiverError::CtsTimeout)
+}
+
 /// Perform a seek and return (freq_10kHz, valid, rssi, snr).
 async fn seek_fm_station<I2C, E>(
     dev: &mut si47xx::FmReceiver<I2C>,
@@ -167,7 +189,7 @@ fn print_fm_info(
     let mut line: String<32> = String::new();
 
     write!(
-        &mut line,        
+        &mut line,
         "{}.{} MHz RSSI={} \nSNR={} {}",
         freq / 100,
         freq % 100,
@@ -180,28 +202,6 @@ fn print_fm_info(
     Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
         .draw(display)
         .ok();
-}
-
-async fn set_property_and_wait<I2C, E>(
-    dev: &mut si47xx::FmReceiver<I2C>,
-    prop: si47xx::ReceiverProperties,
-    value: u16,
-) -> Result<(), si47xx::ReceiverError<E>>
-where
-    I2C: embedded_hal::i2c::I2c<Error = E>,
-{
-    // Send the property
-    dev.set_property(prop as u16, value).await?;
-
-    // Wait for CTS (max ~100 ms should be plenty)
-    for _ in 0..100 {
-        let status = dev.get_int_status().await?;
-        if status.contains(si47xx::ReceiverStatus::CTS) {
-            return Ok(());
-        }
-        Timer::after_millis(1).await;
-    }
-    Err(si47xx::ReceiverError::CtsTimeout)
 }
 
 #[embassy_executor::main]
@@ -292,66 +292,90 @@ async fn main(_s: Spawner) {
     // ================================================================
 
     // 1. GPO_IEN — enable STC, ERR, CTS, RSQ interrupts
-    //    AN332 Table 52: 0x12 0x00 0x00 0x00 0x01 0x00 0xC9
     let gpo_ien =
         GpoIen::STC_IEN | GpoIen::RDS_IEN | GpoIen::RSQ_IEN | GpoIen::ERR_IEN | GpoIen::CTS_IEN;
-    if let Err(_) = device
-        .set_property(si47xx::ReceiverProperties::GpoIen as u16, gpo_ien.bits())
-        .await
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::GpoIen,
+        gpo_ien.bits(),
+    )
+    .await
+    .is_err()
     {
         error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
     }
 
     // 2. REFCLK_FREQ — 32.768 kHz crystal => 32768 Hz
-    //    AN332 Table 52: 0x12 0x00 0x02 0x01 0x7E 0xF4
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::RefclkFreq as u16, 32768)
-        .await;
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::RefclkFreq, 32768)
+        .await
+        .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
-    // 3. REFCLK_PRESCALE — divide by 1 (since RCLK = 32.768 kHz directly)
-    //    AN332 Table 52: 0x12 0x00 0x02 0x02 0x01 0x90
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::RefclkPrescale as u16, 1)
-        .await;
+    // 3. REFCLK_PRESCALE — divide by 1 (RCLK = 32.768 kHz directly)
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::RefclkPrescale, 1)
+        .await
+        .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 4. RX_VOLUME — output volume = 63 (max)
-    //    AN332 Table 52: 0x12 0x00 0x40 0x01 0x00 0x00
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::RxVolume as u16, 63)
-        .await;
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::RxVolume, 63)
+        .await
+        .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 5. FM_DEEMPHASIS — 50 µs (Europe)
-    //    AN332 Table 52: 0x12 0x00 0x11 0x00 0x00 0x01
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmDeemphasis as u16, 1)
-        .await;
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::FmDeemphasis, 1)
+        .await
+        .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 6. RX_HARD_MUTE — enable L and R audio outputs (unmute)
-    //    AN332 Table 52: 0x12 0x00 0x40 0x01 0x00 0x00
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::RxHardMute as u16, 0x0000)
-        .await;
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::RxHardMute, 0x0000)
+        .await
+        .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 7. FM_BLEND_RSSI_STEREO_THRESHOLD — 49 dBµV
-    let _ = device
-        .set_property(
-            si47xx::ReceiverProperties::FmBlendRssiStereoThreshold as u16,
-            49,
-        )
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmBlendRssiStereoThreshold,
+        49,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 8. FM_BLEND_RSSI_MONO_THRESHOLD — 30 dBµV
-    let _ = device
-        .set_property(
-            si47xx::ReceiverProperties::FmBlendRssiMonoThreshold as u16,
-            30,
-        )
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmBlendRssiMonoThreshold,
+        30,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 9. FM_MAX_TUNE_ERROR — 40 kHz
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmMaxTuneError as u16, 40)
-        .await;
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::FmMaxTuneError, 40)
+        .await
+        .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 10. FM_RSQ_INT_SOURCE — enable blend, SNR hi/lo, RSSI hi/lo interrupts
     let rsq_src = FmRsqIntSource::BLEND_IEN
@@ -359,81 +383,160 @@ async fn main(_s: Spawner) {
         | FmRsqIntSource::SNR_LO_IEN
         | FmRsqIntSource::RSSI_HI_IEN
         | FmRsqIntSource::RSSI_LO_IEN;
-    let _ = device
-        .set_property(
-            si47xx::ReceiverProperties::FmRsqIntSource as u16,
-            rsq_src.bits(),
-        )
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmRsqIntSource,
+        rsq_src.bits(),
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 11. FM_RSQ_SNR_HI_THRESHOLD — 30 dB
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmRsqSnrHiThreshold as u16, 30)
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmRsqSnrHiThreshold,
+        30,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 12. FM_RSQ_SNR_LO_THRESHOLD — 6 dB
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmRsqSnrLoThreshold as u16, 6)
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmRsqSnrLoThreshold,
+        6,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 13. FM_RSQ_RSSI_HI_THRESHOLD — 50 dBµV
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmRsqRssiHiThreshold as u16, 50)
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmRsqRssiHiThreshold,
+        50,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 14. FM_RSQ_RSSI_LO_THRESHOLD — 24 dBµV
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmRsqRssiLoThreshold as u16, 24)
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmRsqRssiLoThreshold,
+        24,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 15. FM_RSQ_BLEND_THRESHOLD — pilot = 1, threshold = 50% (0x0032)
-    let _ = device
-        .set_property(
-            si47xx::ReceiverProperties::FmRsqBlendThreshold as u16,
-            0x0032,
-        )
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmRsqBlendThreshold,
+        0x0032,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 16. FM_SOFT_MUTE_MAX_ATTENUATION — 10 dB
-    let _ = device
-        .set_property(
-            si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation as u16,
-            10,
-        )
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation,
+        10,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 17. FM_SOFT_MUTE_SNR_THRESHOLD — 6 dB
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmSoftMuteSnrThreshold as u16, 6)
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSoftMuteSnrThreshold,
+        6,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
-    // 18. FM_SEEK_BAND_BOTTOM — 87.50 MHz 
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmSeekBandBottom as u16, 8750)
-        .await;
+    // 18. FM_SEEK_BAND_BOTTOM — 87.50 MHz
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSeekBandBottom,
+        8750,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
-    // 19. FM_SEEK_BAND_TOP — 107.9 MHz (0x2A26)
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmSeekBandTop as u16, 10790)
-        .await;
+    // 19. FM_SEEK_BAND_TOP — 107.9 MHz
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSeekBandTop,
+        10790,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
-    // 20. FM_SEEK_FREQ_SPACING — 200 kHz for US; use 100 for EU
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmSeekFreqSpacing as u16, 100)
-        .await;
+    // 20. FM_SEEK_FREQ_SPACING — 100 kHz for EU
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSeekFreqSpacing,
+        100,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     // 21. FM_SEEK_TUNE_SNR_THRESHOLD — 6 dB
-    let _ = device
-        .set_property(si47xx::ReceiverProperties::FmSeekTuneSnrThreshold as u16, 6)
-        .await;
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSeekTuneSnrThreshold,
+        6,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
-    // 22. FM_SEEK_TUNE_RSSI_THRESHOLD — 20 dBµV
-    let _ = device
-        .set_property(
-            si47xx::ReceiverProperties::FmSeekTuneRssiThreshold as u16,
-            20,
-        )
-        .await;
+    // 22. FM_SEEK_TUNE_RSSI_THRESHOLD — 10 dBµV
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmSeekTuneRssiThreshold,
+        10,
+    )
+    .await
+    .is_err()
+    {
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+    }
 
     info!("Si4743 configuration complete");
 
