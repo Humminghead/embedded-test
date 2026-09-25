@@ -145,6 +145,19 @@ bitflags! {
     }
 }
 
+// AN332 (REV 1.0); page 79 - FM_RSQ_INT_SOURCE (property 0x1200)
+bitflags! {
+    pub struct FmRsqIntSource: u16 {
+        const MULT_HI_IEN = 0x0001;   // Multipath high interrupt
+        const MULT_LO_IEN = 0x0002;   // Multipath low interrupt
+        const SNR_HI_IEN  = 0x0004;   // SNR high interrupt
+        const SNR_LO_IEN  = 0x0008;   // SNR low interrupt
+        const RSSI_HI_IEN = 0x0010;   // RSSI high interrupt
+        const RSSI_LO_IEN = 0x0020;   // RSSI low interrupt
+        const BLEND_IEN   = 0x0040;   // Stereo/mono blend interrupt
+    }
+}
+
 // AN332 (REV 1.0); Table 14 - AM/SW/LW receiver status
 bitflags! {
     pub struct AmReceiverStatus: u8 {

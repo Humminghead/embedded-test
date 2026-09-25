@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use crate::radio::si47xx::{self, is_bus_cts, PowerUpArg};
+use crate::radio::si47xx::{self, FmRsqIntSource, GpoIen, PowerUpArg, is_bus_cts};
 
 use core::fmt::Write;
 use defmt::{error, info};
@@ -54,6 +54,9 @@ static RESTART_TIME_SEC: u64 = 2;
 const POWER_UP_ARG1_FM: u8 =
     (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
 
+// AN332 Table 52: POWER_UP ARG2 = 0x05 => analog audio, FM receive
+const POWER_UP_ARG2_FM: u8 = 0x05;
+
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 // 40 attempts × 5 ms = 200 ms budget.
 const STC_POLL_MS: u64 = 5;
@@ -95,58 +98,52 @@ async fn error_loop<P: OutputPin>(pin: &mut P, sig: &[(i32, i32)]) -> ! {
     }
 }
 
-async fn seek_fm_station<I2C, E>(dev: &mut si47xx::FmReceiver<I2C>) -> Option<(u16, bool, u8, u8)>
+/// Poll GET_INT_STATUS until STCINT is set or timeout.
+async fn wait_for_stc<I2C, E>(
+    dev: &mut si47xx::FmReceiver<I2C>,
+) -> Result<(), si47xx::ReceiverError<E>>
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
 {
-    let mut fm_status: (u16, bool, u8, u8) = (0, false, 0, 0);
-    let mut attempts = 0u32;
+    for _ in 0..STC_MAX_ATTEMPTS {
+        let s = dev.get_int_status().await?;
+        if s.contains(si47xx::ReceiverStatus::STCINT) {
+            return Ok(());
+        }
+        Timer::after_millis(STC_POLL_MS).await;
+    }
+    Err(si47xx::ReceiverError::CtsTimeout)
+}
 
+/// Perform a seek and return (freq_10kHz, valid, rssi, snr).
+async fn seek_fm_station<I2C, E>(
+    dev: &mut si47xx::FmReceiver<I2C>,
+    wrap: bool,
+) -> Option<(u16, bool, u8, u8)>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+{
     if dev
-        .fm_seek_start(si47xx::SeekDirection::Up, false)
+        .fm_seek_start(si47xx::SeekDirection::Up, wrap)
         .await
         .is_err()
     {
         return None;
     }
 
-    // Wait for STCINT
-    loop {
-        let s = match dev.get_int_status().await {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        if s.contains(si47xx::ReceiverStatus::STCINT) {
-            break;
-        }
-        attempts += 1;
-        if attempts > STC_MAX_ATTEMPTS {
-            return None;
-        }
-        Timer::after_millis(STC_POLL_MS).await;
+    if wait_for_stc(dev).await.is_err() {
+        return None;
     }
 
-    //    device.get_int_status().await
     match dev.fm_tune_status(true).await {
-        Ok(resp) => {
-            //freq
-            fm_status.0 = ((resp[2] as u16) << 8) | resp[3] as u16;
-
-            //valid
-            fm_status.1 = (resp[1] & 0x01) != 0;
-
-            // rssi
-            fm_status.2 = resp[4];
-
-            // snr
-            fm_status.3 = resp[5];
-        }
-        Err(_) => {
-            return None;
-        }
+        Ok(resp) => Some((
+            ((resp[2] as u16) << 8) | resp[3] as u16, // READFREQ
+            (resp[1] & 0x01) != 0,                    // VALID
+            resp[4],                                  // RSSI
+            resp[5],                                  // SNR
+        )),
+        Err(_) => None,
     }
-
-    Some(fm_status)
 }
 
 fn print_yellow_message(
@@ -170,8 +167,8 @@ fn print_fm_info(
     let mut line: String<32> = String::new();
 
     write!(
-        &mut line,
-        "{}.{}kHz {}dB {}dB {}",
+        &mut line,        
+        "{}.{} MHz RSSI={} \nSNR={} {}",
         freq / 100,
         freq % 100,
         rssi,
@@ -185,6 +182,28 @@ fn print_fm_info(
         .ok();
 }
 
+async fn set_property_and_wait<I2C, E>(
+    dev: &mut si47xx::FmReceiver<I2C>,
+    prop: si47xx::ReceiverProperties,
+    value: u16,
+) -> Result<(), si47xx::ReceiverError<E>>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+{
+    // Send the property
+    dev.set_property(prop as u16, value).await?;
+
+    // Wait for CTS (max ~100 ms should be plenty)
+    for _ in 0..100 {
+        let status = dev.get_int_status().await?;
+        if status.contains(si47xx::ReceiverStatus::CTS) {
+            return Ok(());
+        }
+        Timer::after_millis(1).await;
+    }
+    Err(si47xx::ReceiverError::CtsTimeout)
+}
+
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
     let p = embassy_stm32::init(Default::default());
@@ -193,7 +212,6 @@ async fn main(_s: Spawner) {
     let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
 
-    // Create I2C bus
     let i2c = I2c::new(
         p.I2C2,
         p.PA9,
@@ -205,35 +223,24 @@ async fn main(_s: Spawner) {
     );
     let i2c_bus = AtomicCell::new(i2c);
 
-    // Give the radio a view of the bus
     let radio_bus = AtomicDevice::new(&i2c_bus);
     let mut device = si47xx::FmReceiver::new(radio_bus, I2C_ADDR_SEN_1);
 
-    // Give the display a view of the bus
     let display_bus = AtomicDevice::new(&i2c_bus);
     let interface = I2CDisplayInterface::new(display_bus);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
 
-    let text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor> =
-        MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::On)
-            .build();
+    let text_style: MonoTextStyle<'_, BinaryColor> = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
 
-    // Init the display
     display_reset(&mut display_rst_pin).await;
     Timer::after_millis(250).await;
 
-    match display.init() {
-        Ok(_) => {}
-        Err(_e) => {
-            error_loop(
-                &mut led_pin,
-                [BLINK_SHORT, BLINK_SHORT, BLINK_SHORT].as_slice(),
-            )
-            .await;
-        }
+    if display.init().is_err() {
+        error_loop(&mut led_pin, &[BLINK_SHORT, BLINK_SHORT, BLINK_SHORT]).await;
     }
 
     Text::with_baseline(
@@ -244,46 +251,34 @@ async fn main(_s: Spawner) {
     )
     .draw(&mut display)
     .unwrap();
-
     display.flush().unwrap();
 
-    // Reset the device
+    // --- Hardware reset ---
     if !reset_i2c_device(&mut dev_rst_pin).await {
-        error_loop(&mut led_pin, &CODE_RESET_ERR[..]).await;
+        error_loop(&mut led_pin, &CODE_RESET_ERR).await;
     }
 
-    // Power up in FM receive mode with analog audio out
-    let status = match device
+    // --- POWER_UP (analog audio, FM receive) ---
+    // AN332 Table 52: 0x01 0xC0 0x05
+    match device
         .power_up(POWER_UP_ARG1_FM, si47xx::OptMode::AnalogAudio)
         .await
     {
-        Ok(s) => s,
-        Err(_) => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR[..]).await,
-    };
-
-    if si47xx::is_bus_error(status.bits()) {
-        error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR[..]).await;
+        Ok(s) if !si47xx::is_bus_error(s.bits()) => {}
+        _ => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await,
     }
 
-    // tCTS for POWER_UP is 110 ms; wait a bit extra for the crystal to settle (XOSCEN = 1).
     Timer::after_millis(500).await;
 
-    // Wait for CTS
+    // Wait for CTS after POWER_UP
     loop {
-        let s = match device.get_int_status().await {
-            Ok(s) => s,
-            Err(_) => {
-                Timer::after_micros(300).await;
-                continue;
-            }
-        };
-        if is_bus_cts(s.bits()) {
-            break;
+        match device.get_int_status().await {
+            Ok(s) if is_bus_cts(s.bits()) => break,
+            _ => Timer::after_micros(300).await,
         }
-        Timer::after_micros(300).await;
     }
 
-    // Print chip revision
+    // --- GET_REV (AN332 Table 52: 0x10) ---
     match device.get_rev_info().await {
         Ok(rev) => info!(
             "PN=0x{:02X} FW={}.{} CMP={}.{} CHIP=0x{:02X}",
@@ -292,67 +287,186 @@ async fn main(_s: Spawner) {
         Err(_) => error!("GET_REV failed"),
     }
 
-    // Enable STC + CTS + ERR interrupts in GPO_IEN
-    if let Ok(res) = device
-        .set_property(
-            si47xx::ReceiverProperties::GpoIen as u16,
-            (si47xx::GpoIen::STC_IEN | si47xx::GpoIen::CTS_IEN | si47xx::GpoIen::ERR_IEN).bits(),
-        )
+    // ================================================================
+    // AN332 Table 52 — FM/RDS Receiver Configuration Sequence
+    // ================================================================
+
+    // 1. GPO_IEN — enable STC, ERR, CTS, RSQ interrupts
+    //    AN332 Table 52: 0x12 0x00 0x00 0x00 0x01 0x00 0xC9
+    let gpo_ien =
+        GpoIen::STC_IEN | GpoIen::RDS_IEN | GpoIen::RSQ_IEN | GpoIen::ERR_IEN | GpoIen::CTS_IEN;
+    if let Err(_) = device
+        .set_property(si47xx::ReceiverProperties::GpoIen as u16, gpo_ien.bits())
         .await
     {
-        if !is_bus_cts(res.bits()) {
-            error!("GPO_IEN did not return CTS");
-            error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR[..]).await;
-        }
+        error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
     }
 
-    // Soft-mute max attenuation = 10 dB
+    // 2. REFCLK_FREQ — 32.768 kHz crystal => 32768 Hz
+    //    AN332 Table 52: 0x12 0x00 0x02 0x01 0x7E 0xF4
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::RefclkFreq as u16, 32768)
+        .await;
+
+    // 3. REFCLK_PRESCALE — divide by 1 (since RCLK = 32.768 kHz directly)
+    //    AN332 Table 52: 0x12 0x00 0x02 0x02 0x01 0x90
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::RefclkPrescale as u16, 1)
+        .await;
+
+    // 4. RX_VOLUME — output volume = 63 (max)
+    //    AN332 Table 52: 0x12 0x00 0x40 0x01 0x00 0x00
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::RxVolume as u16, 63)
+        .await;
+
+    // 5. FM_DEEMPHASIS — 50 µs (Europe)
+    //    AN332 Table 52: 0x12 0x00 0x11 0x00 0x00 0x01
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmDeemphasis as u16, 1)
+        .await;
+
+    // 6. RX_HARD_MUTE — enable L and R audio outputs (unmute)
+    //    AN332 Table 52: 0x12 0x00 0x40 0x01 0x00 0x00
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::RxHardMute as u16, 0x0000)
+        .await;
+
+    // 7. FM_BLEND_RSSI_STEREO_THRESHOLD — 49 dBµV
     let _ = device
         .set_property(
-            si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation as u16,
-            10 as u16,
+            si47xx::ReceiverProperties::FmBlendRssiStereoThreshold as u16,
+            49,
         )
         .await;
 
-    // Seek the FM band
-    let res: Option<(u16, bool, u8, u8)> = seek_fm_station(&mut device).await;
+    // 8. FM_BLEND_RSSI_MONO_THRESHOLD — 30 dBµV
+    let _ = device
+        .set_property(
+            si47xx::ReceiverProperties::FmBlendRssiMonoThreshold as u16,
+            30,
+        )
+        .await;
 
-    if res.is_none() {
-        flash_signal(&mut led_pin, CODE_FM_NO_STATION_FOUND.as_slice()).await;
-        display.clear_buffer();
-        print_yellow_message("No stations found!", &mut display, text_style);
-        display.flush().unwrap();
+    // 9. FM_MAX_TUNE_ERROR — 40 kHz
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmMaxTuneError as u16, 40)
+        .await;
 
-        // Show message
-        Timer::after_secs(1).await;
-    } else {
-        // Get FM station status
-        let (freq, valid, rssi, snr) = res.unwrap();
+    // 10. FM_RSQ_INT_SOURCE — enable blend, SNR hi/lo, RSSI hi/lo interrupts
+    let rsq_src = FmRsqIntSource::BLEND_IEN
+        | FmRsqIntSource::SNR_HI_IEN
+        | FmRsqIntSource::SNR_LO_IEN
+        | FmRsqIntSource::RSSI_HI_IEN
+        | FmRsqIntSource::RSSI_LO_IEN;
+    let _ = device
+        .set_property(
+            si47xx::ReceiverProperties::FmRsqIntSource as u16,
+            rsq_src.bits(),
+        )
+        .await;
 
-        // Print at the display
-        display.clear_buffer();
-        print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
-        display.flush().unwrap();
-        
-        // Emulate job
-        Timer::after_secs(10).await;
-    }
+    // 11. FM_RSQ_SNR_HI_THRESHOLD — 30 dB
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmRsqSnrHiThreshold as u16, 30)
+        .await;
 
-    // Power down
-    let _ = device.power_down().await;
+    // 12. FM_RSQ_SNR_LO_THRESHOLD — 6 dB
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmRsqSnrLoThreshold as u16, 6)
+        .await;
 
-    display.clear_buffer();
-    Text::with_baseline(
-        "Radio is off!",
-        Point::new(0, 16),
-        text_style,
-        Baseline::Top,
-    )
-    .draw(&mut display)
-    .unwrap();
-    display.flush().unwrap();
+    // 13. FM_RSQ_RSSI_HI_THRESHOLD — 50 dBµV
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmRsqRssiHiThreshold as u16, 50)
+        .await;
 
+    // 14. FM_RSQ_RSSI_LO_THRESHOLD — 24 dBµV
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmRsqRssiLoThreshold as u16, 24)
+        .await;
+
+    // 15. FM_RSQ_BLEND_THRESHOLD — pilot = 1, threshold = 50% (0x0032)
+    let _ = device
+        .set_property(
+            si47xx::ReceiverProperties::FmRsqBlendThreshold as u16,
+            0x0032,
+        )
+        .await;
+
+    // 16. FM_SOFT_MUTE_MAX_ATTENUATION — 10 dB
+    let _ = device
+        .set_property(
+            si47xx::ReceiverProperties::FmSoftMuteMaxAttenuation as u16,
+            10,
+        )
+        .await;
+
+    // 17. FM_SOFT_MUTE_SNR_THRESHOLD — 6 dB
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmSoftMuteSnrThreshold as u16, 6)
+        .await;
+
+    // 18. FM_SEEK_BAND_BOTTOM — 87.50 MHz 
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmSeekBandBottom as u16, 8750)
+        .await;
+
+    // 19. FM_SEEK_BAND_TOP — 107.9 MHz (0x2A26)
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmSeekBandTop as u16, 10790)
+        .await;
+
+    // 20. FM_SEEK_FREQ_SPACING — 200 kHz for US; use 100 for EU
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmSeekFreqSpacing as u16, 100)
+        .await;
+
+    // 21. FM_SEEK_TUNE_SNR_THRESHOLD — 6 dB
+    let _ = device
+        .set_property(si47xx::ReceiverProperties::FmSeekTuneSnrThreshold as u16, 6)
+        .await;
+
+    // 22. FM_SEEK_TUNE_RSSI_THRESHOLD — 20 dBµV
+    let _ = device
+        .set_property(
+            si47xx::ReceiverProperties::FmSeekTuneRssiThreshold as u16,
+            20,
+        )
+        .await;
+
+    info!("Si4743 configuration complete");
+
+    // ================================================================
+    // Main loop: seek for a station, display, repeat
+    // ================================================================
     loop {
-        flash_signal(&mut led_pin, &[BLINK_LONG][..]).await;
+        display.clear_buffer();
+        print_yellow_message("Seeking...", &mut display, text_style);
+        display.flush().unwrap();
+
+        match seek_fm_station(&mut device, true).await {
+            Some((freq, valid, rssi, snr)) => {
+                info!(
+                    "Found station: {}.{} MHz RSSI={} SNR={}",
+                    freq / 100,
+                    freq % 100,
+                    rssi,
+                    snr
+                );
+                display.clear_buffer();
+                print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
+                display.flush().unwrap();
+            }
+            None => {
+                error!("No station found");
+                flash_signal(&mut led_pin, &CODE_FM_NO_STATION_FOUND).await;
+                display.clear_buffer();
+                print_yellow_message("No stations found!", &mut display, text_style);
+                display.flush().unwrap();
+            }
+        }
+
+        Timer::after_secs(5).await;
     }
 }
