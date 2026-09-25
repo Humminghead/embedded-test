@@ -173,7 +173,7 @@ pub enum Function {
 }
 
 pub enum SeekDirection {
-    PowerDown = 0,
+    Down = 0,
     Up = 1,
 }
 
