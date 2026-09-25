@@ -59,8 +59,8 @@ const POWER_UP_ARG2_FM: u8 = 0x05;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 // 40 attempts × 5 ms = 200 ms budget.
-const STC_POLL_MS: u64 = 5;
-const STC_MAX_ATTEMPTS: u32 = 40;
+const STC_POLL_MS: u64 = 100;
+const STC_MAX_ATTEMPTS: u32 = 30;
 
 async fn flash_signal<P: OutputPin>(pin: &mut P, signal: &[(i32, i32)]) {
     for &(h_ms, l_ms) in signal {
@@ -129,6 +129,12 @@ where
     // Wait for CTS, up to ~100 ms
     for _ in 0..100 {
         let status = dev.get_int_status().await?;
+
+        if status.contains(si47xx::ReceiverStatus::ERR) {
+            error!("Si4743 ERR while setting property 0x{:04X}", prop as u16);
+            return Err(si47xx::ReceiverError::InvalidArg);
+        }
+
         if status.contains(si47xx::ReceiverStatus::CTS) {
             return Ok(());
         }
@@ -150,6 +156,7 @@ where
         .await
         .is_err()
     {
+        let _ = dev.fm_seek_cancel().await;
         return None;
     }
 
@@ -174,6 +181,16 @@ fn print_yellow_message(
     text_style: MonoTextStyle<'_, BinaryColor>,
 ) {
     Text::with_baseline(&line, Point::new(0, 0), text_style, Baseline::Top)
+        .draw(display)
+        .ok();
+}
+
+fn print_blue_message(
+    line: &str,
+    display: &mut impl DrawTarget<Color = BinaryColor>,
+    text_style: MonoTextStyle<'_, BinaryColor>,
+) {
+    Text::with_baseline(&line, Point::new(0, 16), text_style, Baseline::Top)
         .draw(display)
         .ok();
 }
@@ -243,14 +260,7 @@ async fn main(_s: Spawner) {
         error_loop(&mut led_pin, &[BLINK_SHORT, BLINK_SHORT, BLINK_SHORT]).await;
     }
 
-    Text::with_baseline(
-        "PowerUP the radio!",
-        Point::new(0, 16),
-        text_style,
-        Baseline::Top,
-    )
-    .draw(&mut display)
-    .unwrap();
+    print_yellow_message("Power up the radio", &mut display, text_style);
     display.flush().unwrap();
 
     // --- Hardware reset ---
@@ -280,12 +290,28 @@ async fn main(_s: Spawner) {
 
     // --- GET_REV (AN332 Table 52: 0x10) ---
     match device.get_rev_info().await {
-        Ok(rev) => info!(
-            "PN=0x{:02X} FW={}.{} CMP={}.{} CHIP=0x{:02X}",
-            rev.pn, rev.fw_major, rev.fw_minor, rev.cmp_major, rev.cmp_minor, rev.chiprev
-        ),
+        Ok(rev) => {
+            info!(
+                "PN=0x{:02X} FW={}.{} CMP={}.{} CHIP=0x{:02X}",
+                rev.pn, rev.fw_major, rev.fw_minor, rev.cmp_major, rev.cmp_minor, rev.chiprev
+            );
+
+            let mut line: String<32> = String::new();
+            write!(
+                &mut line,
+                "PN=0x{:02X} \nFW={}.{} \nCMP={}.{} \nCHIP=0x{:02X}",
+                rev.pn, rev.fw_major, rev.fw_minor, rev.cmp_major, rev.cmp_minor, rev.chiprev
+            )
+            .ok();
+            print_blue_message(&line, &mut display, text_style);
+            display.flush().unwrap();
+        }
         Err(_) => error!("GET_REV failed"),
     }
+
+    // Show chip info
+    Timer::after_secs(3).await;
+    display.clear_buffer();
 
     // ================================================================
     // AN332 Table 52 — FM/RDS Receiver Configuration Sequence
@@ -330,9 +356,13 @@ async fn main(_s: Spawner) {
     }
 
     // 5. FM_DEEMPHASIS — 50 µs (Europe)
-    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::FmDeemphasis, 1)
-        .await
-        .is_err()
+    if set_property_and_wait(
+        &mut device,
+        si47xx::ReceiverProperties::FmDeemphasis,
+        0x0001,
+    )
+    .await
+    .is_err()
     {
         error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
     }
@@ -370,7 +400,7 @@ async fn main(_s: Spawner) {
     }
 
     // 9. FM_MAX_TUNE_ERROR — 40 kHz
-    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::FmMaxTuneError, 40)
+    if set_property_and_wait(&mut device, si47xx::ReceiverProperties::FmMaxTuneError, 20)
         .await
         .is_err()
     {
@@ -514,11 +544,11 @@ async fn main(_s: Spawner) {
         error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
     }
 
-    // 21. FM_SEEK_TUNE_SNR_THRESHOLD — 6 dB
+    // 21. FM_SEEK_TUNE_SNR_THRESHOLD — 6 dB (default: 3 dB)
     if set_property_and_wait(
         &mut device,
         si47xx::ReceiverProperties::FmSeekTuneSnrThreshold,
-        6,
+        3,
     )
     .await
     .is_err()
@@ -526,11 +556,11 @@ async fn main(_s: Spawner) {
         error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
     }
 
-    // 22. FM_SEEK_TUNE_RSSI_THRESHOLD — 10 dBµV
+    // 22. FM_SEEK_TUNE_RSSI_THRESHOLD — 10 dBµV (default: 20 dBµV)
     if set_property_and_wait(
         &mut device,
         si47xx::ReceiverProperties::FmSeekTuneRssiThreshold,
-        10,
+        20,
     )
     .await
     .is_err()
@@ -543,6 +573,7 @@ async fn main(_s: Spawner) {
     // ================================================================
     // Main loop: seek for a station, display, repeat
     // ================================================================
+    let mut wait_time = 2;
     loop {
         display.clear_buffer();
         print_yellow_message("Seeking...", &mut display, text_style);
@@ -560,6 +591,7 @@ async fn main(_s: Spawner) {
                 display.clear_buffer();
                 print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
                 display.flush().unwrap();
+                wait_time = 10;
             }
             None => {
                 error!("No station found");
@@ -567,9 +599,50 @@ async fn main(_s: Spawner) {
                 display.clear_buffer();
                 print_yellow_message("No stations found!", &mut display, text_style);
                 display.flush().unwrap();
+                wait_time = 2;
             }
         }
 
-        Timer::after_secs(5).await;
+        Timer::after_secs(wait_time).await;
     }
+    /*
+    device.set_tune_freq(9410).await.unwrap();
+
+    loop {
+        let s = device.get_int_status().await.unwrap();
+        Timer::after_millis(200).await;
+        if s.contains(si47xx::ReceiverStatus::STCINT) {
+            break;
+        }
+        Timer::after_millis(100).await;
+    }
+    display.clear_buffer();
+
+    let mut line: String<32> = String::new();
+    let resp = device.fm_tune_status(true).await.unwrap();
+
+    let valid = (resp[1] & 0x01) != 0;
+    let afcrl = (resp[1] & 0x02) as u8;
+
+    let freq = ((resp[2] as u16) << 8) | resp[3] as u16;
+    let rssi = resp[4];
+    let snr = resp[5];
+
+    write!(
+        &mut line,
+        "{}.{} MHz RSSI={} \nSNR={} AFCRL={} \nVALID={}",
+        freq / 100,
+        freq % 100,
+        rssi,
+        snr,
+        afcrl,
+        if valid { "OK" } else { "NO" }
+    )
+    .ok();
+
+    print_blue_message(&line, &mut display, text_style);
+    display.flush().unwrap();
+    loop {
+        Timer::after_secs(1).await;
+    }*/
 }
