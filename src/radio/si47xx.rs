@@ -229,7 +229,7 @@ pub struct RevisionResponse {
     pub chiprev: u8,
 }
 
-const NO_ARGS: &[u8;0] = &[];
+const NO_ARGS: &[u8; 0] = &[];
 
 impl RevisionResponse {
     fn ascii_digit_to_u8(digit: &u8) -> u8 {
@@ -289,14 +289,14 @@ where
 
         let mut response = [0u8; N];
         self.bus
-            .write_read(self.address, &buf[..1 + arg_len],  response.as_mut_slice())
+            .write_read(self.address, &buf[..1 + arg_len], response.as_mut_slice())
             .map_err(ReceiverError::I2c)?;
 
         Ok(response)
     }
 
     /// Initiates the boot process to move the device from powerdown to powerup mode
-    /// 
+    ///
     /// AN332 (REV 1.0); page 64
     pub async fn power_up(
         &mut self,
@@ -304,13 +304,16 @@ where
         arg2: OptMode,
     ) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
-            .send_command::<1>(Command::PowerUp as u8, [arg1 as u8, arg2 as u8].as_mut_slice())
+            .send_command::<1>(
+                Command::PowerUp as u8,
+                [arg1 as u8, arg2 as u8].as_mut_slice(),
+            )
             .await?;
         Ok(ReceiverStatus::from_bits(resp[0]).unwrap_or(ReceiverStatus::empty()))
     }
 
     /// Updates bits 6:0 of the status byte.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 70
     pub async fn get_int_status(&mut self) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
@@ -320,7 +323,7 @@ where
     }
 
     /// Moves the device from powerup to powerdown mode.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 67
     pub async fn power_down(&mut self) -> Result<ReceiverStatus, ReceiverError<E>> {
         let resp = self
@@ -330,10 +333,12 @@ where
     }
 
     /// Returns the part number, chip revision, firmware revision, patch revision and component revision numbers.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 66
     pub async fn get_rev_info(&mut self) -> Result<RevisionResponse, ReceiverError<E>> {
-        let data = self.send_command::<9>(Command::GetRev as u8, NO_ARGS.as_slice()).await?;
+        let data = self
+            .send_command::<9>(Command::GetRev as u8, NO_ARGS.as_slice())
+            .await?;
 
         if !is_bus_cts(data[0]) {
             return Err(ReceiverError::CtsTimeout);
@@ -346,7 +351,7 @@ where
     }
 
     /// Sets a property shown in Table 9, “FM/RDS Receiver Property Summary,” on AN332 page 56.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 68
     pub async fn set_property(
         &mut self,
@@ -354,11 +359,11 @@ where
         value: u16,
     ) -> Result<ReceiverStatus, ReceiverError<E>> {
         let args: [u8; 5] = [
-            0x00,                     // Reserved. Always 0.
-            (property >> 8) as u8,    // PROPH
-            (property & 0xFF) as u8,  // PROPL
-            (value >> 8) as u8,       // PROPDH
-            (value & 0xFF) as u8,     // PROPDL
+            0x00,                    // Reserved. Always 0.
+            (property >> 8) as u8,   // PROPH
+            (property & 0xFF) as u8, // PROPL
+            (value >> 8) as u8,      // PROPDH
+            (value & 0xFF) as u8,    // PROPDL
         ];
 
         let result = self
@@ -372,10 +377,10 @@ where
     /// AN332 (REV 1.0); page 70
     pub async fn set_tune_freq(&mut self, freq: u16) -> Result<ReceiverStatus, ReceiverError<E>> {
         let args: [u8; 4] = [
-            0x00,                 // ARG1: FAST=0, FREEZE=0
-            (freq >> 8) as u8,    // ARG2: FREQH
-            (freq & 0xFF) as u8,  // ARG3: FREQL
-            0x00,                 // ARG4: ANTCAP = 0 -> auto
+            0x00,                // ARG1: FAST=0, FREEZE=0
+            (freq >> 8) as u8,   // ARG2: FREQH
+            (freq & 0xFF) as u8, // ARG3: FREQL
+            0x00,                // ARG4: ANTCAP = 0 -> auto
         ];
 
         let result = self
@@ -388,7 +393,7 @@ where
     ///     
     /// AN332 (REV 1.0); page 72
     pub async fn fm_seek_start(
-        &mut self,        
+        &mut self,
         dir: SeekDirection,
         wrap: bool,
     ) -> Result<ReceiverStatus, ReceiverError<E>> {
@@ -401,40 +406,50 @@ where
     }
 
     /// Returns the status of FM_TUNE_FREQ or FM_SEEK_START commands.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 73
     /// Response bytes:
     ///   [0] STATUS, [1] BLTF/AFCRL/VALID, [2] READFREQH, [3] READFREQL,
     ///   [4] RSSI, [5] SNR, [6] MULT, [7] READANTCAP
     pub async fn fm_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        self.send_command::<8>(Command::FmTuneStatus as u8, [arg1].as_slice()).await
+        self.send_command::<8>(Command::FmTuneStatus as u8, [arg1].as_slice())
+            .await
     }
 
     /// Returns status information about the received signal quality.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 75
     /// Response bytes:
     ///   [0] STATUS, [1] INT flags, [2] SMUTE/AFCRL/VALID, [3] PILOT/STBLEND,
     ///   [4] RSSI, [5] SNR, [6] MULT, [7] FREQOFF
     pub async fn fm_rsq_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        self.send_command::<8>(Command::FmRsqStatus as u8, [arg1].as_slice()).await
+        self.send_command::<8>(Command::FmRsqStatus as u8, [arg1].as_slice())
+            .await
+    }
+
+    pub async fn fm_seek_cancel(&mut self) -> Result<[u8; 8], ReceiverError<E>> {
+        self.send_command::<8>(
+            Command::FmTuneStatus as u8,
+            &[0x02], // CANCEL=1
+        )
+        .await
     }
 
     /// Tunes the AM/SW/LW receive to a frequency between 149 and 23 MHz in 1 kHz steps.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 135    
     pub async fn set_am_tune_freq(
         &mut self,
         freq_khz: u16,
     ) -> Result<AmReceiverStatus, ReceiverError<E>> {
         let args: [u8; 5] = [
-            0x00,                          // ARG1: FAST = 0
-            (freq_khz >> 8) as u8,         // ARG2: FREQH
-            (freq_khz & 0xFF) as u8,       // ARG3: FREQL
-            0x00,                          // ARG4: auto antenna cap (high)
-            0x00,                          // ARG5: auto antenna cap (low)
+            0x00,                    // ARG1: FAST = 0
+            (freq_khz >> 8) as u8,   // ARG2: FREQH
+            (freq_khz & 0xFF) as u8, // ARG3: FREQL
+            0x00,                    // ARG4: auto antenna cap (high)
+            0x00,                    // ARG5: auto antenna cap (low)
         ];
 
         let r = self
@@ -444,10 +459,11 @@ where
     }
 
     /// Returns the status of AM_TUNE_FREQ or AM_SEEK_START commands.
-    /// 
+    ///
     /// AN332 (REV 1.0); page 139    
     pub async fn am_tune_status(&mut self, intack: bool) -> Result<[u8; 8], ReceiverError<E>> {
         let arg1 = if intack { 0x01 } else { 0x00 };
-        self.send_command::<8>(Command::AmTuneStatus as u8, [arg1].as_slice()).await
+        self.send_command::<8>(Command::AmTuneStatus as u8, [arg1].as_slice())
+            .await
     }
 }
