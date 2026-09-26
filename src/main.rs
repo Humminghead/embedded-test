@@ -10,6 +10,8 @@ use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::i2c::I2c;
 use embassy_stm32::peripherals::I2C2;
+use embassy_stm32::rcc::{LseConfig, LseDrive, LseMode, Mco, McoConfig, McoPrescaler, McoSource};
+use embassy_stm32::time::Hertz;
 use embassy_stm32::{bind_interrupts, dma, peripherals};
 use embassy_time::Timer;
 use embedded_graphics::{
@@ -52,10 +54,9 @@ static RESTART_TIME_SEC: u64 = 2;
 // AN332 page 65 note: for Si474x it says "Set to 0" but that note only applies
 // when an *external* clock source feeds RCLK; with a passive crystal XOSCEN must be 1.
 const POWER_UP_ARG1_FM: u8 =
-    (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
-
-// AN332 Table 52: POWER_UP ARG2 = 0x05 => analog audio, FM receive
-const POWER_UP_ARG2_FM: u8 = 0x05;
+    //(PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
+    //(PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits()) as u8;
+    (PowerUpArg::CTSIEN.bits()) as u8;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 // 40 attempts × 5 ms = 200 ms budget.
@@ -147,7 +148,7 @@ where
 async fn seek_fm_station<I2C, E>(
     dev: &mut si47xx::FmReceiver<I2C>,
     wrap: bool,
-) -> Option<(u16, bool, u8, u8)>
+) -> Option<(u16, bool, u8, u8, u8)>
 where
     I2C: embedded_hal::i2c::I2c<Error = E>,
 {
@@ -170,6 +171,7 @@ where
             (resp[1] & 0x01) != 0,                    // VALID
             resp[4],                                  // RSSI
             resp[5],                                  // SNR
+            (resp[1] & 0x02) as u8,                   // AFCRL
         )),
         Err(_) => None,
     }
@@ -200,19 +202,21 @@ fn print_fm_info(
     valid: bool,
     rssi: u8,
     snr: u8,
+    afcrl: u8,
     display: &mut impl DrawTarget<Color = BinaryColor>,
     text_style: MonoTextStyle<'_, BinaryColor>,
 ) {
-    let mut line: String<32> = String::new();
+    let mut line: String<64> = String::new();
 
     write!(
         &mut line,
-        "{}.{} MHz RSSI={} \nSNR={} {}",
+        "{}.{} MHz RSSI={}\nSNR={} AFCRL={}\nVALID={}",
         freq / 100,
         freq % 100,
         rssi,
         snr,
-        if valid { "OK" } else { "--" }
+        afcrl,
+        if valid { "OK" } else { "NO" }
     )
     .ok();
 
@@ -223,20 +227,38 @@ fn print_fm_info(
 
 #[embassy_executor::main]
 async fn main(_s: Spawner) {
-    let p = embassy_stm32::init(Default::default());
+    let mut config = embassy_stm32::Config::default();
+    config.rcc.ls = embassy_stm32::rcc::LsConfig {
+        rtc: embassy_stm32::rcc::RtcClockSource::Lse, // Use LSE for RTC
+        lsi: false,                                   // Disable LSI
+        lse: Some(LseConfig {
+            frequency: Hertz(32_768),
+            mode: LseMode::Oscillator(LseDrive::MediumHigh),
+        }),
+    };
+
+    let p = embassy_stm32::init(config);
+
+    // Wait for the LSE oscillator to stabilize
+    embassy_time::Timer::after_millis(2000).await; // 2 seconds
+
+    //MCO pin
+    let config_mco1 = {
+        let mut config = McoConfig::default();
+        config.prescaler = McoPrescaler::Div1;
+        config
+    };
+    let _mco1 = Mco::new(p.MCO, p.PA8, McoSource::Lse, config_mco1);
 
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
     let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
-    let mut led_pin = Output::new(p.PC13, Level::High, Speed::Low);
+    let mut led_pin = Output::new(p.PE9, Level::High, Speed::Low);
+
+    let mut i2c_config = embassy_stm32::i2c::Config::default();
+    i2c_config.frequency = Hertz::khz(10); // Drop to 100kHz
 
     let i2c = I2c::new(
-        p.I2C2,
-        p.PA9,
-        p.PA10,
-        p.DMA1_CH4,
-        p.DMA1_CH5,
-        Irqs,
-        Default::default(),
+        p.I2C2, p.PA9, p.PA10, p.DMA1_CH4, p.DMA1_CH5, Irqs, i2c_config,
     );
     let i2c_bus = AtomicCell::new(i2c);
 
@@ -274,11 +296,24 @@ async fn main(_s: Spawner) {
         .power_up(POWER_UP_ARG1_FM, si47xx::OptMode::AnalogAudio)
         .await
     {
-        Ok(s) if !si47xx::is_bus_error(s.bits()) => {}
+        Ok(s) if !si47xx::is_bus_error(s.bits()) => loop {
+            if is_bus_cts(s.bits()) {
+                break;
+            }
+            Timer::after_micros(300).await;
+            display.clear_buffer();
+            print_yellow_message("Wait for CTS (0)...", &mut display, text_style);
+            display.flush().unwrap();
+        },
         _ => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await,
     }
 
     Timer::after_millis(500).await;
+
+    // CTS wait
+    display.clear_buffer();
+    print_yellow_message("Wait for CTS (1)...", &mut display, text_style);
+    display.flush().unwrap();
 
     // Wait for CTS after POWER_UP
     loop {
@@ -287,6 +322,10 @@ async fn main(_s: Spawner) {
             _ => Timer::after_micros(300).await,
         }
     }
+
+    display.clear_buffer();
+    print_yellow_message("PowerUp command (OK)", &mut display, text_style);
+    display.flush().unwrap();
 
     // --- GET_REV (AN332 Table 52: 0x10) ---
     match device.get_rev_info().await {
@@ -306,7 +345,12 @@ async fn main(_s: Spawner) {
             print_blue_message(&line, &mut display, text_style);
             display.flush().unwrap();
         }
-        Err(_) => error!("GET_REV failed"),
+        Err(_) => {
+            error!("GET_REV failed");
+            display.clear_buffer();
+            print_yellow_message("GET_REV failed", &mut display, text_style);
+            display.flush().unwrap();
+        }
     }
 
     // Show chip info
@@ -570,26 +614,67 @@ async fn main(_s: Spawner) {
 
     info!("Si4743 configuration complete");
 
+    device.set_tune_freq(9410).await.unwrap();
+
+    loop {
+        let s = device.get_int_status().await.unwrap();
+        Timer::after_millis(200).await;
+        if s.contains(si47xx::ReceiverStatus::STCINT) {
+            break;
+        }
+        Timer::after_millis(100).await;
+    }
+    display.clear_buffer();
+
+    let mut line: String<44> = String::new();
+    let resp = device.fm_tune_status(true).await.unwrap();
+
+    let valid = (resp[1] & 0x01) != 0;
+    let afcrl = (resp[1] & 0x02) as u8;
+
+    let freq = ((resp[2] as u16) << 8) | resp[3] as u16;
+    let rssi = resp[4];
+    let snr = resp[5];
+
+    write!(
+        &mut line,
+        "{}.{} MHz RSSI={} \nSNR={} AFCRL={} \nVALID={}",
+        freq / 100,
+        freq % 100,
+        rssi,
+        snr,
+        afcrl,
+        if valid { "OK" } else { "NO" }
+    )
+    .ok();
+
+    print_blue_message(&line, &mut display, text_style);
+    display.flush().unwrap();
+
+    Timer::after_secs(5).await;
+
     // ================================================================
     // Main loop: seek for a station, display, repeat
     // ================================================================
-    let mut wait_time = 2;
+    let mut wait_time: u64;
     loop {
         display.clear_buffer();
         print_yellow_message("Seeking...", &mut display, text_style);
         display.flush().unwrap();
 
         match seek_fm_station(&mut device, true).await {
-            Some((freq, valid, rssi, snr)) => {
+            Some((freq, valid, rssi, snr, afcrl)) => {
                 info!(
-                    "Found station: {}.{} MHz RSSI={} SNR={}",
+                    "VALID({}): {}.{} MHz RSSI={} SNR={} AFCRL={}",
+                    valid as u8,
                     freq / 100,
                     freq % 100,
                     rssi,
-                    snr
+                    snr,
+                    afcrl
                 );
                 display.clear_buffer();
-                print_fm_info(freq, valid, rssi, snr, &mut display, text_style);
+                print_fm_info(freq, valid, rssi, snr, afcrl, &mut display, text_style);
                 display.flush().unwrap();
                 wait_time = 10;
             }
