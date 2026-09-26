@@ -70,7 +70,7 @@ async fn flash_signal<P: OutputPin>(pin: &mut P, signal: &[(i32, i32)]) {
         let _ = pin.set_low();
         Timer::after_millis(l_ms as u64).await;
     }
-    let _ = pin.set_high();
+    //let _ = pin.set_high();
 }
 
 async fn reset_i2c_device<P: OutputPin>(pin: &mut P) -> bool {
@@ -298,15 +298,7 @@ async fn main(_s: Spawner) {
         .power_up(POWER_UP_ARG1_FM, si47xx::OptMode::AnalogAudio)
         .await
     {
-        Ok(s) if !si47xx::is_bus_error(s.bits()) => loop {
-            if is_bus_cts(s.bits()) {
-                break;
-            }
-            Timer::after_micros(300).await;
-            display.clear_buffer();
-            print_yellow_message("Wait for CTS (0)...", &mut display, text_style);
-            display.flush().unwrap();
-        },
+        Ok(s) if !si47xx::is_bus_error(s.bits()) => {}
         _ => error_loop(&mut led_pin, &CODE_IIC_INVALID_ARG_ERR).await,
     }
 
@@ -314,15 +306,35 @@ async fn main(_s: Spawner) {
 
     // CTS wait
     display.clear_buffer();
-    print_yellow_message("Wait for CTS (1)...", &mut display, text_style);
+    print_yellow_message("Wait for CTS...", &mut display, text_style);
     display.flush().unwrap();
 
     // Wait for CTS after POWER_UP
+    let mut attempts = 0u32;
     loop {
         match device.get_int_status().await {
             Ok(s) if is_bus_cts(s.bits()) => break,
-            _ => Timer::after_micros(300).await,
+            Ok(s) => {
+                info!("status=0x{:02X} (no CTS yet)", s.bits());
+            }
+            Err(e) => match e {
+                si47xx::ReceiverError::I2c(_) => {
+                    error!("I2C error while waiting for CTS");
+                }
+                si47xx::ReceiverError::InvalidArg => {
+                    error!("Si4743 rejected a command argument (ERR bit set)");
+                }
+                si47xx::ReceiverError::CtsTimeout => {
+                    error!("CTS timeout waiting for Si4743");
+                }
+            },
         }
+        attempts += 1;
+        if attempts > 2000 {
+            // ~600ms at 300us
+            error_loop(&mut led_pin, &CODE_IIC_CTS_TIMEOUT_ERR).await;
+        }
+        Timer::after_micros(300).await;
     }
 
     display.clear_buffer();
