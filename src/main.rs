@@ -54,9 +54,9 @@ static RESTART_TIME_SEC: u64 = 2;
 // Per AN332: "Set to 0 for Si4740/41/42/43/44/45/49" (these chips have no crystal osc).
 // when an *external* clock source feeds RCLK; with a passive crystal XOSCEN must be 1.
 const POWER_UP_ARG1_FM: u8 =
-    //(PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
-    //(PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits()) as u8;
-    (PowerUpArg::CTSIEN.bits()) as u8;
+    // (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
+    (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits()) as u8;
+    // (PowerUpArg::CTSIEN.bits()) as u8;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 // 40 attempts × 5 ms = 200 ms budget.
@@ -252,13 +252,13 @@ async fn main(_s: Spawner) {
 
     // Give the Si4743 time to see a stable clock before POWER_UP
     Timer::after_millis(200).await;
-
+ 
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
     let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PE9, Level::High, Speed::Low);
 
     let mut i2c_config = embassy_stm32::i2c::Config::default();
-    i2c_config.frequency = Hertz::khz(100); // 100 kHz standard mode
+    i2c_config.frequency = Hertz::khz(75); // 100 kHz standard mode
 
     let i2c = I2c::new(
         p.I2C2, p.PA9, p.PA10, p.DMA1_CH4, p.DMA1_CH5, Irqs, i2c_config,
@@ -336,10 +336,12 @@ async fn main(_s: Spawner) {
         }
         Timer::after_micros(300).await;
     }
-
+ 
     display.clear_buffer();
     print_yellow_message("PowerUp command (OK)", &mut display, text_style);
     display.flush().unwrap();
+
+    Timer::after_secs(1).await;
 
     // --- GET_REV (AN332 Table 52: 0x10) ---
     match device.get_rev_info().await {
@@ -629,9 +631,9 @@ async fn main(_s: Spawner) {
     info!("Si4743 configuration complete");
 
     // ================================================================
-    // Manual tune test on 94.10 MHz
+    // Manual tune test on 9010 MHz
     // ================================================================
-    device.set_tune_freq(9410).await.unwrap();
+    device.set_tune_freq(9010).await.unwrap();
 
     loop {
         let s = device.get_int_status().await.unwrap();
@@ -652,7 +654,7 @@ async fn main(_s: Spawner) {
     let snr = resp[5];
 
     info!(
-        "TUNE 94.10 MHz -> FREQ={} RSSI={} SNR={} AFCRL={} VALID={}",
+        "TUNE 90.10 MHz -> FREQ={} RSSI={} SNR={} AFCRL={} VALID={}",
         freq, rssi, snr, afcrl, valid
     );
 
@@ -671,7 +673,7 @@ async fn main(_s: Spawner) {
     print_blue_message(&line, &mut display, text_style);
     display.flush().unwrap();
 
-    Timer::after_secs(5).await;
+    Timer::after_secs(30).await;
 
     // ================================================================
     // Main seek loop
@@ -696,7 +698,7 @@ async fn main(_s: Spawner) {
                 display.clear_buffer();
                 print_fm_info(freq, valid, rssi, snr, afcrl, &mut display, text_style);
                 display.flush().unwrap();
-                wait_time = 10;
+                wait_time = 120;
             }
             None => {
                 error!("No station found");
