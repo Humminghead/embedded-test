@@ -241,12 +241,11 @@ async fn main(_s: Spawner) {
     // Generate 32.768 kHz reference clock on PA0 (TIM2_CH1) via PWM.
     // ================================================================
 
-    let ch1_pin: PwmPin<'_, peripherals::TIM2, embassy_stm32::timer::Ch1> =
-        PwmPin::new(p.PA0, OutputType::PushPull);
+    let rclk_pin = PwmPin::new(p.PA0, OutputType::PushPull);
 
     let mut pwm = SimplePwm::new(
         p.TIM2,
-        Some(ch1_pin),
+        Some(rclk_pin),
         None,
         None,
         None,
