@@ -611,7 +611,7 @@ async fn main(_s: Spawner) {
     if set_property_and_wait(
         &mut device,
         si47xx::ReceiverProperties::FmSeekFreqSpacing,
-        si47xx::FmSeekSpacing::KHz50 as u16,
+        si47xx::FmSeekSpacing::KHz100 as u16,
     )
     .await
     .is_err()
