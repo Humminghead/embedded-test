@@ -109,6 +109,15 @@ pub enum ReceiverProperties {
     RxHardMute = 0x4001,
 }
 
+// AN332 (REV 1.0); page 101, Property 0x1402. FM_SEEK_FREQ_SPACING
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FmSeekSpacing {    
+    KHz50 = (5 & 0x1F),
+    KHz100 = (10 & 0x1F),
+    KHz200 = (20 & 0x1F),
+}
+
 // AN332 (REV 1.0); page 65, ARG1 of POWER_UP
 bitflags! {
     pub struct PowerUpArg: u8 {
