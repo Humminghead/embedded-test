@@ -7,12 +7,14 @@ use core::fmt::Write;
 use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
+use embassy_stm32::exti::{self, ExtiInput};
+use embassy_stm32::gpio::Pull;
 use embassy_stm32::gpio::{Level, Output, OutputType, Speed};
 use embassy_stm32::i2c::I2c;
 use embassy_stm32::peripherals::I2C2;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::{bind_interrupts, dma, peripherals};
+use embassy_stm32::{bind_interrupts, dma, interrupt, peripherals};
 use embassy_time::Timer;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle, MonoTextStyleBuilder},
@@ -33,6 +35,7 @@ bind_interrupts!(
         I2C2_ER => embassy_stm32::i2c::ErrorInterruptHandler<I2C2>;
         DMA1_CHANNEL4 => dma::InterruptHandler<peripherals::DMA1_CH4>;
         DMA1_CHANNEL5 => dma::InterruptHandler<peripherals::DMA1_CH5>;
+        EXTI0 => exti::InterruptHandler<interrupt::typelevel::EXTI0>;
     }
 );
 
@@ -44,7 +47,7 @@ static BLINK_SHORT: (i32, i32) = (250, 250);
 static CODE_RESET_ERR: [(i32, i32); 2] = [BLINK_SHORT, BLINK_SHORT]; // 2
 static CODE_IIC_CTS_TIMEOUT_ERR: [(i32, i32); 2] = [BLINK_LONG, BLINK_SHORT]; //11
 static CODE_IIC_INVALID_ARG_ERR: [(i32, i32); 3] = [BLINK_LONG, BLINK_SHORT, BLINK_SHORT]; //12
-//static CODE_IIC_STCINT_ERR: [(i32, i32); 4] = [BLINK_LONG, BLINK_SHORT, BLINK_SHORT, BLINK_SHORT]; //13
+                                                                                           //static CODE_IIC_STCINT_ERR: [(i32, i32); 4] = [BLINK_LONG, BLINK_SHORT, BLINK_SHORT, BLINK_SHORT]; //13
 static CODE_FM_NO_STATION_FOUND: [(i32, i32); 2] = [BLINK_LONG, BLINK_LONG]; //20
 
 static RESTART_TIME_SEC: u64 = 2;
@@ -60,7 +63,7 @@ static REFCLK_PRESCALE: u16 = 1;
 const POWER_UP_ARG1_FM: u8 =
     // (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits() | PowerUpArg::XOSCEN.bits()) as u8;
     (PowerUpArg::CTSIEN.bits() | PowerUpArg::GPO2OEN.bits()) as u8;
-    // (PowerUpArg::CTSIEN.bits()) as u8;
+// (PowerUpArg::CTSIEN.bits()) as u8;
 
 // FM_TUNE_FREQ: tSTC ≈ 60–80 ms on FMRX 4.0 (AN332 Table 49).
 const STC_POLL_MS: u64 = 100;
@@ -241,21 +244,21 @@ async fn main(_s: Spawner) {
     // Generate 32.768 kHz reference clock on PA0 (TIM2_CH1) via PWM.
     // ================================================================
 
-    let rclk_pin = PwmPin::new(p.PA0, OutputType::PushPull);
+    let rclk_pin = PwmPin::new(p.PA1, OutputType::PushPull);
 
     let mut pwm = SimplePwm::new(
         p.TIM2,
-        Some(rclk_pin),
         None,
+        Some(rclk_pin),
         None,
         None,
         Hertz(REFCLK_FREQ as u32),
         Default::default(),
     );
 
-    let mut ch1 = pwm.ch1();
-    ch1.enable();
-    ch1.set_duty_cycle_fraction(1, 2); // 50% duty cycle
+    let mut ch2 = pwm.ch2();
+    ch2.enable();
+    ch2.set_duty_cycle_fraction(1, 2); // 50% duty cycle
 
     // Give the Si4743 time to see a stable clock before POWER_UP
     Timer::after_millis(200).await;
@@ -263,6 +266,7 @@ async fn main(_s: Spawner) {
     let mut dev_rst_pin = Output::new(p.PB1, Level::Low, Speed::Low);
     let mut display_rst_pin = Output::new(p.PB0, Level::Low, Speed::Low);
     let mut led_pin = Output::new(p.PE9, Level::High, Speed::Low);
+    let mut button = ExtiInput::new(p.PA0, p.EXTI0, Pull::Down, Irqs);
 
     let mut i2c_config = embassy_stm32::i2c::Config::default();
     i2c_config.frequency = Hertz::khz(75); // 100 kHz standard mode
@@ -688,16 +692,16 @@ async fn main(_s: Spawner) {
     print_blue_message(&line, &mut display, text_style);
     display.flush().unwrap();
 
-    Timer::after_secs(10).await;
-
     // ================================================================
     // Main seek loop
     // ================================================================
-    let mut wait_time: u64;
+
     loop {
+        button.wait_for_falling_edge().await;
+        
         display.clear_buffer();
         print_yellow_message("Seeking...", &mut display, text_style);
-        display.flush().unwrap();
+        display.flush().unwrap();        
 
         match seek_fm_station(&mut device, true).await {
             Some((freq, valid, rssi, snr, afcrl, mult, cap)) => {
@@ -715,11 +719,6 @@ async fn main(_s: Spawner) {
                 display.clear_buffer();
                 print_fm_info(freq, valid, rssi, snr, afcrl, &mut display, text_style);
                 display.flush().unwrap();
-                if !valid {
-                    wait_time = 2;
-                } else {
-                    wait_time = 20;
-                }
             }
             None => {
                 error!("No station found");
@@ -727,10 +726,9 @@ async fn main(_s: Spawner) {
                 display.clear_buffer();
                 print_yellow_message("No stations found!", &mut display, text_style);
                 display.flush().unwrap();
-                wait_time = 2;
             }
         }
 
-        Timer::after_secs(wait_time).await;
+        button.wait_for_rising_edge().await;
     }
 }
